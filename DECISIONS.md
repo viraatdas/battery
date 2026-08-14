@@ -15,3 +15,11 @@ Shared, agent-authored log of cross-cutting decisions the fleet must honor. The 
   - Implement analytics queries and real SwiftUI UI in BatteryScopeApp [out of lane] — BatteryScopeApp is a minimal placeholder view; UI/analytics are explicitly out of scope for this foundation node
 - **By:** n0 · 2026-08-14T22:28:04.062Z
 
+## n0: Resolved the 2-sided .gitignore merge conflict by unioning both
+- **Did:** Resolved the 2-sided .gitignore merge conflict by unioning both sides (build/db/DS_Store ignores from n0 + Rudder orchestration ignores from the base). Foundation node n0 is complete and verified: swift build succeeds and swift test passes 29 tests, 0 failures. Package.swift declares all five targets (BatteryCore library, batteryscoped and BatteryScopeApp executables, BatteryCoreTests and BatteryscopedTests), so downstream nodes never need to edit it.
+- **Interfaces:** Package.swift (5 targets, no external deps, macOS 14, swift-tools 5.9). Sources/BatteryCore/Models.swift: BatterySample, ProcessSample, ProcessCategory (browser/terminal/devtools/media/communication/system/background/other) - all Codable+Sendable. Sources/BatteryCore/Categorizer.swift: pure rule-table classifier over process name/path. Sources/BatteryCore/Store.swift: SQLiteStore(path:mode:) with .readWrite/.readOnly, WAL on, schema v1 (battery_samples, process_samples + indexes), insert(batterySample:), insert(processSamples:) batched in one transaction, prune(olderThanDays:), batterySamples(from:to:), processSamples(from:to:); BatteryScopePaths.defaultDBPath. Stubs: Sources/batteryscoped/main.swift (usage+exit), Sources/BatteryScopeApp/BatteryScopeApp.swift (@main SwiftUI App).
+- **Follow-ups:**
+  - powermetrics/IOKit sampling in batteryscoped [out of lane] — main.swift is still a usage-printing stub; the daemon loop and real sampling belong to a later node
+  - Analytics queries and real SwiftUI UI [out of lane] — Store exposes only basic fetch; aggregation by category over time and the visual UI are owned by downstream nodes
+- **By:** n0 · 2026-08-14T22:30:20.889Z
+

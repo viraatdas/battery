@@ -1,3 +1,8 @@
+.build/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
 .rudder/
 .rudder-worktrees/
 RUDDER.md
