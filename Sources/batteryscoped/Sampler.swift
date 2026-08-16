@@ -44,8 +44,77 @@ public final class Sampler {
             log.error("battery sample failed: \(String(describing: error), privacy: .public)")
         }
 
-        sampleProcesses(timestampMs: timestampMs, battery: battery)
+        samplePressure(timestampMs: timestampMs)
+
+        // One process-table read per tick, shared by both consumers below. It
+        // is taken unconditionally — including on AC at a full charge, where
+        // the powermetrics call is skipped — because a machine wedged while
+        // plugged in is exactly the case worth recording.
+        let processTable = ProcessTableReader.snapshot()
+        sampleTrackedProcesses(timestampMs: timestampMs, snapshot: processTable)
+        sampleProcesses(timestampMs: timestampMs, battery: battery, processTable: processTable)
         pruneIfDue(now: now)
+    }
+
+    // MARK: - Agent sampling
+
+    /// The previous tick's process table, kept so cumulative CPU counters can
+    /// be turned into a rate.
+    private var previousProcessTable: ProcessTableReader.PreviousSnapshot?
+
+    /// Records the members of every coding-agent process tree.
+    ///
+    /// Runs whether or not powermetrics is available: ancestry, memory, and CPU
+    /// time all come from the process table, which needs no privilege. This is
+    /// what lets an unprivileged sampler still answer "which session was
+    /// holding the machine when it froze" — the question that does not wait for
+    /// someone to install a daemon.
+    private func sampleTrackedProcesses(timestampMs: Int64, snapshot: [Int32: ProcessTableReader.Entry]) {
+        defer {
+            previousProcessTable = ProcessTableReader.PreviousSnapshot(
+                timestampMs: timestampMs,
+                entries: snapshot
+            )
+        }
+        guard !snapshot.isEmpty else { return }
+        do {
+            let samples = ProcessTableReader.trackedSamples(
+                timestampMs: timestampMs,
+                snapshot: snapshot,
+                previous: previousProcessTable
+            )
+            guard !samples.isEmpty else { return }
+            try store.insert(trackedSamples: samples)
+            log.debug("wrote \(samples.count) tracked samples")
+        } catch {
+            log.error("tracked sample failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    // MARK: - Pressure sampling
+
+    /// Records machine-wide memory/CPU/thermal pressure.
+    ///
+    /// Unconditional, unlike process sampling: it needs no root and costs a
+    /// few sysctls, and a stall on AC power at a full charge is exactly the
+    /// case the process sampler skips — and exactly the case someone hunting a
+    /// hang cares about.
+    private func samplePressure(timestampMs: Int64) {
+        do {
+            let sample = SystemPressureReader.read(
+                timestampMs: timestampMs,
+                intervalSeconds: configuration.pressureIntervalSeconds
+            )
+            try store.insert(pressureSample: sample)
+            log.debug("""
+                pressure memory=\(sample.memoryLevel.rawValue, privacy: .public) \
+                thermal=\(sample.thermalLevel.rawValue, privacy: .public) \
+                load=\(sample.loadAverage1m, format: .fixed(precision: 2)) \
+                swap=\(sample.swapUsedBytes / 1_048_576)MB
+                """)
+        } catch {
+            log.error("pressure sample failed: \(String(describing: error), privacy: .public)")
+        }
     }
 
     // MARK: - Process sampling
@@ -58,7 +127,11 @@ public final class Sampler {
         return battery.externalPower && !battery.isCharging && battery.percent >= 99.5
     }
 
-    private func sampleProcesses(timestampMs: Int64, battery: BatterySample?) {
+    private func sampleProcesses(
+        timestampMs: Int64,
+        battery: BatterySample?,
+        processTable: [Int32: ProcessTableReader.Entry]
+    ) {
         if Sampler.shouldSkipProcessSampling(battery: battery) {
             processLog.debug("skipping process sample: on AC at full charge")
             return
@@ -73,11 +146,15 @@ public final class Sampler {
             processLog.error("powermetrics failed: \(failure.description, privacy: .public)")
         case .success(let data):
             do {
-                let samples = try PowermetricsParser.parse(data, timestampMs: timestampMs)
-                guard !samples.isEmpty else {
+                let parsed = try PowermetricsParser.parse(data, timestampMs: timestampMs)
+                guard !parsed.isEmpty else {
                     processLog.notice("powermetrics returned no tasks")
                     return
                 }
+                // Ancestry and resident memory come from the kernel, not from
+                // powermetrics, so the tick's process-table read is folded in
+                // here rather than repeated.
+                let samples = ProcessTableReader.enrich(parsed, with: processTable)
                 try store.insert(processSamples: samples)
                 processLog.debug("wrote \(samples.count) process samples")
             } catch {
@@ -114,21 +191,48 @@ public final class Sampler {
 
     // MARK: - Loop
 
-    /// Samples forever at the configured interval. The sleep is measured from
-    /// the tick's start so a slow powermetrics call does not shift the cadence.
+    /// Samples forever, at two cadences.
+    ///
+    /// A full tick — battery, process table, powermetrics — runs every
+    /// `intervalSeconds`. Between those, the much cheaper pressure read runs
+    /// every `pressureIntervalSeconds`, so a stall shorter than a full tick
+    /// still leaves a trace. Both sleeps are measured from their start instant,
+    /// so a slow powermetrics call delays a tick without shifting the cadence.
     public func run() {
         log.notice("""
             batteryscoped started: interval=\(self.configuration.intervalSeconds)s \
+            pressure=\(self.configuration.pressureIntervalSeconds)s \
             db=\(self.configuration.databasePath, privacy: .public)
             """)
         while true {
             let startedAt = Date()
             tick(now: startedAt)
-            let elapsed = Date().timeIntervalSince(startedAt)
-            let remaining = configuration.intervalSeconds - elapsed
-            if remaining > 0 {
-                Thread.sleep(forTimeInterval: remaining)
-            }
+            sleepUntilNextTick(after: startedAt)
         }
+    }
+
+    /// Waits out the remainder of this tick's interval, taking pressure
+    /// readings on the way.
+    private func sleepUntilNextTick(after startedAt: Date) {
+        let nextTickAt = startedAt.addingTimeInterval(configuration.intervalSeconds)
+        let pressureInterval = configuration.pressureIntervalSeconds
+        guard pressureInterval > 0, pressureInterval < configuration.intervalSeconds else {
+            let remaining = nextTickAt.timeIntervalSinceNow
+            if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
+            return
+        }
+
+        // Sub-tick instants are computed from the tick's start rather than
+        // accumulated, so a slow read cannot drift the whole schedule late.
+        var nextPressureAt = startedAt.addingTimeInterval(pressureInterval)
+        while nextPressureAt < nextTickAt {
+            let wait = nextPressureAt.timeIntervalSinceNow
+            if wait > 0 { Thread.sleep(forTimeInterval: wait) }
+            samplePressure(timestampMs: Int64((Date().timeIntervalSince1970 * 1000).rounded()))
+            nextPressureAt = nextPressureAt.addingTimeInterval(pressureInterval)
+        }
+
+        let remaining = nextTickAt.timeIntervalSinceNow
+        if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
     }
 }

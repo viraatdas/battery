@@ -36,6 +36,58 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(decoded, sample)
     }
 
+    // MARK: - preciseCharge
+
+    private func sample(rawCurrentMah: Double?, rawMaxMah: Double?) -> BatterySample {
+        BatterySample(
+            timestampMs: 0,
+            percent: 50,
+            isCharging: false,
+            externalPower: false,
+            wattsDrawn: -5,
+            voltageMv: 12_000,
+            amperageMa: -400,
+            cycleCount: 10,
+            maxCapacityPct: 95,
+            rawCurrentMah: rawCurrentMah,
+            rawMaxMah: rawMaxMah
+        )
+    }
+
+    func testPreciseChargeIsTheRawMahRatio() throws {
+        let value = try XCTUnwrap(sample(rawCurrentMah: 4000, rawMaxMah: 8033).preciseCharge)
+        XCTAssertEqual(value, 4000.0 / 8033.0 * 100, accuracy: 0.0001)
+    }
+
+    func testPreciseChargeIsNilWhenEitherRawValueIsMissing() {
+        XCTAssertNil(sample(rawCurrentMah: nil, rawMaxMah: 8033).preciseCharge)
+        XCTAssertNil(sample(rawCurrentMah: 4000, rawMaxMah: nil).preciseCharge)
+        XCTAssertNil(sample(rawCurrentMah: nil, rawMaxMah: nil).preciseCharge)
+    }
+
+    func testPreciseChargeIsNilWhenRawMaxIsZeroOrRatioOutOfRange() {
+        XCTAssertNil(sample(rawCurrentMah: 4000, rawMaxMah: 0).preciseCharge)
+        // A current reading above max would be a nonsense ratio (>100%).
+        XCTAssertNil(sample(rawCurrentMah: 9000, rawMaxMah: 8000).preciseCharge)
+    }
+
+    func testBatterySampleDefaultsLeaveRawCapacityNil() {
+        let sample = BatterySample(
+            timestampMs: 0,
+            percent: 50,
+            isCharging: false,
+            externalPower: false,
+            wattsDrawn: -5,
+            voltageMv: 12_000,
+            amperageMa: -400,
+            cycleCount: 10,
+            maxCapacityPct: 95
+        )
+        XCTAssertNil(sample.rawCurrentMah)
+        XCTAssertNil(sample.rawMaxMah)
+        XCTAssertNil(sample.preciseCharge)
+    }
+
     func testProcessCategoryRawValuesAreStable() {
         // These raw values are persisted in the DB; changing them is a schema migration.
         XCTAssertEqual(ProcessCategory.browser.rawValue, "browser")

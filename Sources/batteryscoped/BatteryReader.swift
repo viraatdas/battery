@@ -64,8 +64,8 @@ public enum BatteryReader {
         // `Amperage` is an average; `InstantAmperage` is the live value. Prefer
         // the live one when it is present and non-zero, which tracks bursty
         // drain far better at a 30 s cadence.
-        let instant = number(properties, "InstantAmperage")
-        let average = number(properties, "Amperage")
+        let instant = signedRegisterValue(properties, "InstantAmperage")
+        let average = signedRegisterValue(properties, "Amperage")
         let amperageMa = clampAmperage((instant ?? 0) != 0 ? (instant ?? 0) : (average ?? instant ?? 0))
 
         let isCharging = boolean(properties, "IsCharging") ?? false
@@ -85,6 +85,7 @@ public enum BatteryReader {
             nominalCapacity: number(properties, "NominalChargeCapacity"),
             designCapacity: designCapacity
         )
+        let (rawCurrentMah, rawMaxMah) = preciseChargeMah(rawCurrent: rawCurrent, rawMax: rawMax)
 
         return BatterySample(
             timestampMs: timestampMs,
@@ -96,7 +97,9 @@ public enum BatteryReader {
             amperageMa: Int(amperageMa.rounded()),
             cycleCount: Int(number(properties, "CycleCount") ?? 0),
             maxCapacityPct: maxCapacityPct,
-            temperatureC: normalizeTemperature(number(properties, "Temperature"))
+            temperatureC: normalizeTemperature(number(properties, "Temperature")),
+            rawCurrentMah: rawCurrentMah,
+            rawMaxMah: rawMaxMah
         )
     }
 
@@ -187,6 +190,22 @@ public enum BatteryReader {
         return value
     }
 
+    /// `AppleRawCurrentCapacity`/`AppleRawMaxCapacity` are only trustworthy as
+    /// mAh — and worth keeping as the high-resolution charge signal — when
+    /// they are unambiguously not percent-shaped. A Mac that reports them as
+    /// small percent-like numbers (or omits them) gets `(nil, nil)`, so
+    /// `BatterySample.preciseCharge` cleanly falls back to `percent` instead
+    /// of masquerading as extra precision it doesn't have.
+    private static func preciseChargeMah(rawCurrent: Double?, rawMax: Double?) -> (Double?, Double?) {
+        guard let rawCurrent, let rawMax,
+              rawCurrent.isFinite, rawMax.isFinite,
+              rawCurrent > 100, rawMax > 100
+        else {
+            return (nil, nil)
+        }
+        return (rawCurrent, rawMax)
+    }
+
     private static func number(_ properties: [String: Any], _ key: String) -> Double? {
         switch properties[key] {
         case let value as NSNumber:
@@ -198,6 +217,25 @@ public enum BatteryReader {
         default:
             return nil
         }
+    }
+
+    /// Like `number(_:_:)`, but repairs a register read that IOKit surfaces
+    /// as an unsigned 64-bit integer instead of a proper negative one — e.g.
+    /// `ioreg` showing `Amperage = 18446744073709549886` for what is actually
+    /// -1730 mA. `NSNumber.doubleValue` cannot recover the exact integer once
+    /// it's this large (IEEE 754 doubles only carry 53 bits of mantissa), so
+    /// this reinterprets via `NSNumber.int64Value` instead, which reads the
+    /// same 64-bit storage as two's-complement and stays exact. Values that
+    /// only *look* huge because they're double-backed (not integer-backed)
+    /// are left alone: their `int64Value` would just saturate to `Int64.max`,
+    /// which is no more meaningful than the original and still gets discarded
+    /// by `clampAmperage`'s ±30000 sanity check either way.
+    private static func signedRegisterValue(_ properties: [String: Any], _ key: String) -> Double? {
+        guard let value = properties[key] as? NSNumber else { return number(properties, key) }
+        guard value.doubleValue >= 9_223_372_036_854_775_808.0 else { return value.doubleValue } // 2^63
+        let type = String(cString: value.objCType)
+        guard type != "f", type != "d" else { return value.doubleValue }
+        return Double(value.int64Value)
     }
 
     private static func boolean(_ properties: [String: Any], _ key: String) -> Bool? {

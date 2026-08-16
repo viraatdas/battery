@@ -10,6 +10,11 @@ import SwiftUI
 struct TopOffendersView: View {
     var processes: [ProcessUsage]
     var windowTitle: String
+    /// False when the database has never recorded a process sample at all —
+    /// in that case `ProcessSamplerMissingNotice` already explains why above
+    /// this section, so the empty state here stays brief rather than
+    /// repeating it.
+    var hasEverRecordedProcessSamples: Bool = true
 
     /// Eight rows is what fits without the panel becoming a scroll marathon,
     /// and past eight the shares are noise anyway.
@@ -26,7 +31,9 @@ struct TopOffendersView: View {
                 "~ marks an estimate. macOS reports a unitless energy impact per process, not watts, so shares are ranked from that and the window's measured discharge is divided among them."
         ) {
             if rows.isEmpty {
-                EmptyHint("No app activity recorded for \(windowTitle).")
+                EmptyHint(hasEverRecordedProcessSamples
+                    ? "No app activity recorded for \(windowTitle)."
+                    : "Not available — see above.")
             } else {
                 VStack(spacing: 7) {
                     ForEach(Array(rows.enumerated()), id: \.element.name) { index, usage in

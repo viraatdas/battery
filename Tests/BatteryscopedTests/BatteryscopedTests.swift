@@ -274,6 +274,85 @@ final class BatteryReaderConversionTests: XCTestCase {
         XCTAssertEqual(sample.amperageMa, 0)
         XCTAssertEqual(sample.wattsDrawn, 0)
     }
+
+    // MARK: - Unsigned amperage overflow
+
+    func testUnsignedAmperageOverflowIsReinterpretedAsNegative() {
+        // A real ioreg dump on this class of Mac: the register read is
+        // actually -1730 mA, but surfaces as its unsigned 64-bit bit
+        // pattern instead of a proper two's-complement negative.
+        let properties: [String: Any] = [
+            "CurrentCapacity": 52,
+            "MaxCapacity": 100,
+            "Voltage": 12000,
+            "Amperage": UInt64(18_446_744_073_709_549_886),
+        ]
+        let sample = BatteryReader.sample(from: properties, timestampMs: timestamp)
+        XCTAssertEqual(sample.amperageMa, -1730)
+        XCTAssertLessThan(sample.wattsDrawn, 0)
+    }
+
+    // MARK: - Raw mAh capacity (precise charge)
+
+    func testSampleFromRealIoregDumpPopulatesRawCapacityInMah() {
+        // Values lifted verbatim from a real Apple Silicon AppleSmartBattery
+        // node: CurrentCapacity/MaxCapacity are percent-shaped (52/100), but
+        // AppleRaw{Current,Max}Capacity carry the real mAh resolution.
+        let properties: [String: Any] = [
+            "CurrentCapacity": 52,
+            "MaxCapacity": 100,
+            "AppleRawCurrentCapacity": 4000,
+            "AppleRawMaxCapacity": 8033,
+            "NominalChargeCapacity": 8277,
+            "DesignCapacity": 8579,
+            "Voltage": 12000,
+            "Amperage": -1000,
+        ]
+        let sample = BatteryReader.sample(from: properties, timestampMs: timestamp)
+
+        // Display parity with macOS is unchanged: percent still comes from
+        // the integer CurrentCapacity/MaxCapacity pair.
+        XCTAssertEqual(sample.percent, 52, accuracy: 0.0001)
+        XCTAssertEqual(sample.rawCurrentMah, 4000)
+        XCTAssertEqual(sample.rawMaxMah, 8033)
+        XCTAssertEqual(try XCTUnwrap(sample.preciseCharge), 4000.0 / 8033.0 * 100, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(sample.preciseCharge), 49.79, accuracy: 0.01)
+    }
+
+    func testSampleWithoutAppleRawKeysLeavesRawCapacityNil() {
+        // A Mac (or a stale ioreg dump) with no AppleRaw* keys at all.
+        let properties: [String: Any] = [
+            "CurrentCapacity": 73,
+            "MaxCapacity": 100,
+            "Voltage": 12000,
+            "Amperage": -1200,
+        ]
+        let sample = BatteryReader.sample(from: properties, timestampMs: timestamp)
+
+        XCTAssertEqual(sample.percent, 73, accuracy: 0.0001)
+        XCTAssertNil(sample.rawCurrentMah)
+        XCTAssertNil(sample.rawMaxMah)
+        XCTAssertNil(sample.preciseCharge)
+    }
+
+    func testSampleWithPercentShapedRawKeysLeavesRawCapacityNil() {
+        // Some Macs mirror AppleRawCurrentCapacity/AppleRawMaxCapacity as the
+        // same small percent-like numbers as CurrentCapacity/MaxCapacity;
+        // that shape must not masquerade as mAh precision.
+        let properties: [String: Any] = [
+            "CurrentCapacity": 40,
+            "MaxCapacity": 100,
+            "AppleRawCurrentCapacity": 40,
+            "AppleRawMaxCapacity": 100,
+            "Voltage": 12000,
+            "Amperage": -900,
+        ]
+        let sample = BatteryReader.sample(from: properties, timestampMs: timestamp)
+
+        XCTAssertNil(sample.rawCurrentMah)
+        XCTAssertNil(sample.rawMaxMah)
+        XCTAssertNil(sample.preciseCharge)
+    }
 }
 
 final class SamplerIntegrationTests: XCTestCase {

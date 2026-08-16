@@ -14,6 +14,7 @@ INSTALL_PATH="/usr/local/libexec/batteryscoped"
 DATA_DIR="/Library/Application Support/BatteryScope"
 LOG_DIR="/Library/Logs/BatteryScope"
 INSTALLED_PLIST="/Library/LaunchDaemons/${LABEL}.plist"
+INSTALLED_NEWSYSLOG_CONF="/etc/newsyslog.d/batteryscope.conf"
 PURGE=0
 
 for argument in "$@"; do
@@ -41,6 +42,9 @@ rm -f "${INSTALLED_PLIST}"
 
 echo "==> Removing ${INSTALL_PATH}"
 rm -f "${INSTALL_PATH}"
+
+echo "==> Removing ${INSTALLED_NEWSYSLOG_CONF}"
+rm -f "${INSTALLED_NEWSYSLOG_CONF}"
 
 if [ "${PURGE}" -eq 1 ]; then
     echo "==> Purging ${DATA_DIR}"

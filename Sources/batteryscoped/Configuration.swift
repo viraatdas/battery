@@ -16,6 +16,25 @@ public struct Configuration: Equatable {
     /// Samples older than this are dropped once an hour.
     public static let retentionDays = 30
 
+    /// Seconds between *pressure* readings, which run far more often than the
+    /// full tick.
+    ///
+    /// A stall lasting twenty seconds is a stall someone noticed, and at a
+    /// 30-second cadence it is invisible — it can fall entirely between two
+    /// samples. Pressure is cheap enough to read this often (a handful of
+    /// sysctls) and small enough to store, unlike the process table.
+    ///
+    /// The two cadences are deliberately different. Detection needs to be fast;
+    /// attribution does not, because a process holding 12 GB does not appear
+    /// and vanish inside thirty seconds.
+    public static let defaultPressureIntervalSeconds: Double = 5
+
+    /// The pressure cadence actually in force: `defaultPressureIntervalSeconds`,
+    /// or the tick interval when that is somehow shorter.
+    public var pressureIntervalSeconds: Double {
+        min(Configuration.defaultPressureIntervalSeconds, intervalSeconds)
+    }
+
     public init(
         intervalSeconds: Double = Configuration.defaultIntervalSeconds,
         databasePath: String = DBLocation.writablePath(),

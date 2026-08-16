@@ -30,6 +30,17 @@ public struct ProcessTotals: Sendable, Hashable {
     }
 }
 
+/// The two rollups of one window's process samples, produced together.
+public struct ProcessRollups: Sendable {
+    public var totals: [ProcessTotals]
+    public var agentTimeline: [AgentSessions.Tick]
+
+    public init(totals: [ProcessTotals], agentTimeline: [AgentSessions.Tick]) {
+        self.totals = totals
+        self.agentTimeline = agentTimeline
+    }
+}
+
 /// Aggregate fetches the analytics layer needs on top of the raw sample reads.
 ///
 /// These roll up in one streaming pass over the store's fetch API rather than in
@@ -42,13 +53,31 @@ extension SQLiteStore {
     /// Per-process totals for `[from, to]`, collapsed by `(name, category)` and
     /// ordered by descending energy impact.
     public func processTotals(from: Date, to: Date) throws -> [ProcessTotals] {
+        try processTotals(of: processSamples(from: from, to: to))
+    }
+
+    /// Both rollups the report needs, from one fetch.
+    ///
+    /// `process_samples` is the large table — one row per process per tick — so
+    /// the difference between one pass and two over a 7-day window is real.
+    /// Callers that need only one rollup should keep using the single-purpose
+    /// method above; this exists for `Analytics.report`, which needs both.
+    public func processRollups(from: Date, to: Date) throws -> ProcessRollups {
+        let samples = try processSamples(from: from, to: to)
+        return ProcessRollups(
+            totals: processTotals(of: samples),
+            agentTimeline: AgentSessions.timeline(samples: samples)
+        )
+    }
+
+    private func processTotals(of samples: [ProcessSample]) -> [ProcessTotals] {
         struct Key: Hashable {
             var name: String
             var category: ProcessCategory
         }
 
         var accumulator: [Key: ProcessTotals] = [:]
-        for sample in try processSamples(from: from, to: to) {
+        for sample in samples {
             let key = Key(name: sample.name, category: sample.category)
             if var existing = accumulator[key] {
                 existing.energyImpact += sample.energyImpact

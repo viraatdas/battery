@@ -16,6 +16,8 @@ struct DrainChartView: View {
     @Binding var metric: ChartData.Metric
     @Binding var choice: WindowChoice
 
+    @Environment(\.isOffscreenRender) private var isOffscreenRender
+
     private var domain: ClosedRange<Date> { series.window.start...series.window.end }
 
     /// Ticks past this point would have their label clipped by the right edge of
@@ -39,15 +41,20 @@ struct DrainChartView: View {
                 EmptyHint("No battery samples in \(choice.longTitle) yet.")
             }
         } accessory: {
-            Picker("Window", selection: $choice) {
-                ForEach(WindowChoice.allCases) { option in
-                    Text(option.title).tag(option)
+            if isOffscreenRender {
+                SegmentedStandIn(options: WindowChoice.allCases.map(\.title), selected: choice.title)
+                    .frame(width: 176)
+            } else {
+                Picker("Window", selection: $choice) {
+                    ForEach(WindowChoice.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 176)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
-            .frame(width: 176)
         }
     }
 
@@ -168,15 +175,20 @@ struct DrainChartView: View {
                 legendItem(color: Color.secondary.opacity(0.3), label: "Asleep")
             }
             Spacer(minLength: 0)
-            Picker("Rate unit", selection: $metric) {
-                ForEach(ChartData.Metric.allCases) { option in
-                    Text(option.axisLabel).tag(option)
+            if isOffscreenRender {
+                SegmentedStandIn(options: ChartData.Metric.allCases.map(\.axisLabel), selected: metric.axisLabel)
+                    .frame(width: 92)
+            } else {
+                Picker("Rate unit", selection: $metric) {
+                    ForEach(ChartData.Metric.allCases) { option in
+                        Text(option.axisLabel).tag(option)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.mini)
+                .frame(width: 92)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.mini)
-            .frame(width: 92)
         }
         .font(.caption2)
         .foregroundStyle(.secondary)

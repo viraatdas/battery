@@ -41,9 +41,22 @@ enum Fmt {
 
     // MARK: - Durations
 
+    /// The largest `Double` that both round-trips through `Int` exactly and
+    /// is safe to hand to `Int.init(_:)` — `Double(Int.max)` is itself *not*
+    /// safe, since it rounds up to the next representable `Double`, which is
+    /// one past `Int.max` and traps on conversion back. 2^53 is comfortably
+    /// past any duration this app ever computes (billions of years).
+    private static let maxSafeIntDouble = Double(1 << 53)
+
     /// `4h 10m`, `42m`, `3m`. Never `0h 42m`.
+    ///
+    /// `Int(Double)` traps for NaN and for a finite value outside `Int`'s
+    /// range, and `hoursRemaining` reaches here straight from a division
+    /// (`percent / rate`) that can produce either, so both are guarded
+    /// against rather than left to crash the app over a label.
     static func hoursMinutes(_ hours: Double) -> String {
-        let totalMinutes = Int((abs(hours) * 60).rounded())
+        guard hours.isFinite else { return "—" }
+        let totalMinutes = Int(min((abs(hours) * 60).rounded(), maxSafeIntDouble))
         let wholeHours = totalMinutes / 60
         let minutes = totalMinutes % 60
         if wholeHours == 0 { return "\(minutes)m" }
@@ -53,12 +66,13 @@ enum Fmt {
 
     /// How stale a reading is: `just now`, `20s ago`, `4m ago`, `2h ago`.
     static func age(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite else { return "—" }
         let value = max(0, seconds)
         if value < 5 { return "just now" }
         if value < 90 { return "\(Int(value.rounded()))s ago" }
         if value < 5400 { return "\(Int((value / 60).rounded()))m ago" }
         if value < 172_800 { return "\(Int((value / 3600).rounded()))h ago" }
-        return "\(Int((value / 86400).rounded()))d ago"
+        return "\(Int(min((value / 86400).rounded(), maxSafeIntDouble)))d ago"
     }
 
     /// Clock time for a chart axis. On-the-hour ticks drop their `:00`, which is
@@ -84,6 +98,17 @@ enum Fmt {
             grouped.append(character)
         }
         return value < 0 ? "-\(grouped)" : grouped
+    }
+
+    /// Memory sizes: `4.8 GB`, `640 MB`. Binary units, so the numbers line up
+    /// with Activity Monitor rather than disagreeing with it by 7%.
+    static func bytes(_ value: Int64) -> String {
+        let gigabyte = 1024.0 * 1024 * 1024
+        let megabyte = 1024.0 * 1024
+        let magnitude = Double(abs(value))
+        if magnitude >= gigabyte { return String(format: "%.1f GB", Double(value) / gigabyte) }
+        if magnitude >= megabyte { return String(format: "%.0f MB", Double(value) / megabyte) }
+        return String(format: "%.0f KB", Double(value) / 1024)
     }
 
     // MARK: - Estimates

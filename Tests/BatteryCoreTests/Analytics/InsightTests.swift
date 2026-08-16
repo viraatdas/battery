@@ -213,16 +213,58 @@ final class InsightTests: XCTestCase {
             pctPerHour: 30,
             watts: 25
         )
+        // fullChargeRuntimeHours (5h) deliberately differs from 100/30 =
+        // 3.33h (this window's own rate), to prove the "on a full charge"
+        // clause reuses BatteryHealth's figure -- the same basis the header
+        // and health card already show -- rather than recomputing it from
+        // this window's own, possibly short or noisy, rate. Three different
+        // "full charge" numbers on screen at once, each from a different
+        // window, is exactly the incoherence this reuse exists to prevent.
+        let health = BatteryHealth(
+            cycleCount: 300,
+            maxCapacityPct: 95,
+            percent: 60,
+            isCharging: false,
+            externalPower: false,
+            sampledAt: Fixtures.at(Fixtures.hours(2)),
+            medianPctPerHour: 30,
+            medianWatts: 25,
+            fullChargeRuntimeHours: 5,
+            estimatedHoursRemaining: 3,
+            measuredOver: twoHourWindow
+        )
         let high = try XCTUnwrap(insight(
             "high-drain-rate",
-            in: InsightEngine.insights(context(samples: samples, window: twoHourWindow))
+            in: InsightEngine.insights(context(samples: samples, window: twoHourWindow, health: health))
         ))
 
         XCTAssertEqual(high.title, "High drain rate: 30.0%/hr")
         XCTAssertTrue(high.detail.contains("25.0 W"), high.detail)
-        // 100 / 30 = 3.33 hours on a full charge.
-        XCTAssertTrue(high.detail.contains("3h 20m"), high.detail)
+        XCTAssertTrue(high.detail.contains("5h"), high.detail)
+        XCTAssertFalse(high.detail.contains("3h 20m"), high.detail)
         XCTAssertEqual(high.severity, .warning)
+    }
+
+    func testHighDrainRateOmitsFullChargeClauseWithoutHealth() throws {
+        // No BatteryHealth available (e.g. nothing sampled in the lookback):
+        // omit the "on a full charge" clause entirely rather than falling
+        // back to recomputing it from this window's own rate, which is the
+        // exact inconsistency `context.health?.fullChargeRuntimeHours` exists
+        // to avoid.
+        let samples = Fixtures.run(
+            from: Fixtures.anchor,
+            hours: 2,
+            startPercent: 90,
+            pctPerHour: 30,
+            watts: 25
+        )
+        let high = try XCTUnwrap(insight(
+            "high-drain-rate",
+            in: InsightEngine.insights(context(samples: samples, window: twoHourWindow, health: nil))
+        ))
+
+        XCTAssertFalse(high.detail.contains("full charge"), high.detail)
+        XCTAssertTrue(high.detail.contains("25.0 W"), high.detail)
     }
 
     func testModerateDrainRateDoesNotFire() {
@@ -357,6 +399,40 @@ final class InsightTests: XCTestCase {
 
         XCTAssertEqual(thin.title, "You were mostly on AC power")
         XCTAssertTrue(thin.detail.contains("9m"), thin.detail)
+    }
+
+    func testMostlyAsleepNamesSleepNotACPower() throws {
+        // Ten minutes awake and discharging, the rest of a two-hour window
+        // asleep -- never plugged in. Telling the user they were "mostly on
+        // AC power" here would be false; the insight must name sleep.
+        var samples = Fixtures.run(from: Fixtures.anchor, hours: 1 / 6, startPercent: 60, pctPerHour: 10)
+        samples.append(Fixtures.batterySample(at: Fixtures.at(600 + 6_550), percent: 58))
+        let insights = InsightEngine.insights(context(samples: samples, window: twoHourWindow))
+        let thin = try XCTUnwrap(insight("mostly-plugged-in", in: insights))
+
+        XCTAssertEqual(thin.title, "You were mostly asleep")
+        XCTAssertTrue(thin.detail.contains("your Mac was asleep for"), thin.detail)
+        XCTAssertFalse(thin.detail.contains("plugged in for"), thin.detail)
+    }
+
+    func testMostlyPluggedInOrAsleepNamesBothWhenNeitherDominates() throws {
+        // Charging and sleep in the same ballpark: name both rather than
+        // picking a side arbitrarily.
+        var samples = Fixtures.run(from: Fixtures.anchor, hours: 1, startPercent: 60, pctPerHour: 0, charging: true)
+        samples += Fixtures.run(
+            from: Fixtures.at(Fixtures.hours(1)),
+            hours: 1 / 6,
+            startPercent: 60,
+            pctPerHour: 10,
+            includeStart: false
+        )
+        samples.append(Fixtures.batterySample(at: Fixtures.at(Fixtures.hours(1) + 600 + 4_500), percent: 58))
+        let window = TimeWindow(start: Fixtures.anchor, end: Fixtures.at(9_000))
+        let insights = InsightEngine.insights(context(samples: samples, window: window))
+        let thin = try XCTUnwrap(insight("mostly-plugged-in", in: insights))
+
+        XCTAssertEqual(thin.title, "You were mostly plugged in or asleep")
+        XCTAssertTrue(thin.detail.contains("plugged in or asleep for"), thin.detail)
     }
 
     // MARK: - Ranking

@@ -90,6 +90,33 @@ enum InsightFormat {
         return "the last \(hoursMinutes(hours))"
     }
 
+    /// Memory sizes in the units people actually use for them: `4.8 GB`,
+    /// `640 MB`. Binary units, matching Activity Monitor's arithmetic.
+    static func bytes(_ value: Int64) -> String {
+        let magnitude = Double(abs(value))
+        let gigabyte = 1024.0 * 1024 * 1024
+        let megabyte = 1024.0 * 1024
+        if magnitude >= gigabyte {
+            return String(format: "%.1f GB", Double(value) / gigabyte)
+        }
+        if magnitude >= megabyte {
+            return String(format: "%.0f MB", Double(value) / megabyte)
+        }
+        return String(format: "%.0f KB", Double(value) / 1024)
+    }
+
+    /// A count of CPU cores' worth of work: `6.2 cores`, `1 core`.
+    static func cores(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        if rounded == 1 { return "1 core" }
+        return String(format: "%.1f cores", rounded)
+    }
+
+    /// `3 agents` / `1 agent`.
+    static func agents(_ count: Int) -> String {
+        count == 1 ? "1 agent" : "\(count) agents"
+    }
+
     /// A friendly name for a category, for use inside a sentence.
     static func categoryLabel(_ category: ProcessCategory) -> String {
         switch category {

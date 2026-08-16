@@ -22,7 +22,41 @@
     <key>StandardErrorPath</key>
     <string>/Library/Logs/BatteryScope/daemon.log</string>
 
+    <!-- Background subjects the process to launchd's aggressive idle/App Nap-style
+         throttling — fine for opportunistic housekeeping, wrong for a sampler
+         whose whole job is a metronomic ~20s cadence, since that tier coalesces
+         and defers timers instead of firing them on schedule. (Separately, live
+         data has shown nominal 20s ticks fragmenting into ragged 74-1239s gaps;
+         that run was an unprivileged user-mode `batteryscoped`, not this
+         LaunchDaemon, so ProcessType was never in effect for it and it is not
+         being cited as the cause here — just the general reason Background is
+         the wrong tier for this daemon.) Adaptive keeps normal scheduling while
+         the daemon has an active reason to run, without Background's throttling. -->
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Adaptive</string>
+
+    <!-- If the binary crash-loops (bad build, corrupt DB, missing powermetrics),
+         cap restarts to 1 per 10s instead of spinning launchd and burning battery
+         doing the very thing this tool measures. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- This process must not be deferred behind other disk I/O: it is a small,
+         latency-sensitive periodic writer, not a bulk background job. -->
+    <key>LowPriorityIO</key>
+    <false/>
+
+    <!-- The daemon runs as root and writes the SQLite database, plus the
+         batteryscope.db-wal/-shm sidecars WAL mode requires. The app reads that
+         database read-only as the invoking (non-root) user, and SQLite needs
+         read access to the -shm file to read a WAL database at all. SQLite
+         creates all three files at mode 0666 masked by the process umask, so an
+         explicit 022 here (rather than trusting launchd's default) is what makes
+         every file the daemon ever creates 0644 — world-readable, root-writable
+         — without a per-file chmod in the sampler code. install-daemon.sh
+         additionally fixes up any sidecar files already on disk from before
+         this key existed. -->
+    <key>Umask</key>
+    <string>022</string>
 </dict>
 </plist>

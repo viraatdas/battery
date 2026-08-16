@@ -9,6 +9,11 @@ import SwiftUI
 struct CategoryBreakdownView: View {
     var categories: [CategoryUsage]
     var windowTitle: String
+    /// False when the database has never recorded a process sample at all —
+    /// in that case `ProcessSamplerMissingNotice` already explains why above
+    /// this section, so the empty state here stays brief rather than
+    /// repeating it.
+    var hasEverRecordedProcessSamples: Bool = true
 
     private var rows: [CategoryUsage] {
         CategoryStyle.sorted(categories.filter { $0.sharePct > 0 })
@@ -25,7 +30,9 @@ struct CategoryBreakdownView: View {
                 "Watt-hours are estimates: measured discharge apportioned by each app's share of energy impact."
         ) {
             if rows.isEmpty {
-                EmptyHint("No process activity recorded for \(windowTitle).")
+                EmptyHint(hasEverRecordedProcessSamples
+                    ? "No process activity recorded for \(windowTitle)."
+                    : "Not available — see above.")
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     stackedBar

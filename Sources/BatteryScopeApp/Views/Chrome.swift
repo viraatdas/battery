@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Shared layout constants. One place to change the rhythm of the whole panel.
@@ -113,4 +114,90 @@ extension Text {
     /// Numbers must not reflow as they change; every figure in this app is
     /// tabular.
     func numeric() -> Text { self.monospacedDigit() }
+}
+
+/// A shell command with a "Copy" button, in the app's own visual language.
+///
+/// Used everywhere the app explains a command instead of running it itself:
+/// onboarding when there is no database yet, and the per-app panels' notice
+/// when the daemon has never written a process sample.
+struct CommandBox: View {
+    var command: String
+
+    @State private var copied = false
+    @Environment(\.isOffscreenRender) private var isOffscreenRender
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(command)
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Spacer(minLength: 8)
+            if isOffscreenRender {
+                // Like the segmented pickers, a borderless NSButton's bezel
+                // needs a live window to draw into and comes out as the same
+                // solid block offscreen. A static label stands in for it here.
+                Label("Copy", systemImage: "doc.on.doc")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption)
+                    .foregroundStyle(.tint)
+            } else {
+                Button {
+                    copy()
+                } label: {
+                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .labelStyle(.titleAndIcon)
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.tint)
+                .help("Copy the command to the clipboard")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(.separator, lineWidth: 1)
+        )
+    }
+
+    private func copy() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(command, forType: .string)
+        copied = true
+        Task {
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            copied = false
+        }
+    }
+}
+
+/// A non-interactive lookalike for `Picker(.segmented)`, used only by the
+/// offscreen self-test in place of the real thing — see `isOffscreenRender`.
+struct SegmentedStandIn: View {
+    var options: [String]
+    var selected: String
+
+    var body: some View {
+        HStack(spacing: 1) {
+            ForEach(options, id: \.self) { option in
+                Text(option)
+                    .font(.caption2.weight(option == selected ? .semibold : .regular))
+                    .foregroundStyle(option == selected ? Color.primary : Color.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 3)
+                    .background(
+                        option == selected ? Color.primary.opacity(0.12) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    )
+            }
+        }
+        .padding(2)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
 }

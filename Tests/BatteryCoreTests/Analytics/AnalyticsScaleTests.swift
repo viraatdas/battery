@@ -37,7 +37,12 @@ final class AnalyticsScaleTests: XCTestCase {
         let report = try analytics.report(window: window)
         let elapsed = Date().timeIntervalSince(started)
 
-        XCTAssertLessThan(elapsed, 5, "seven-day report took \(elapsed)s")
+        // Measured ~25-26ms on this machine as of this comment (~10k battery
+        // rows, ~20k process rows). 0.5s leaves ~20x headroom for a slower CI
+        // box while still catching a real regression back toward multi-second
+        // territory -- the old 5s ceiling had ~200x headroom, which is why it
+        // stayed green through a real order-of-magnitude slowdown.
+        XCTAssertLessThan(elapsed, 0.5, "seven-day report took \(elapsed)s")
         // Auto-bucketed to six hours. Buckets are epoch-aligned, so a window
         // starting at 10:00 opens inside the 06:00 bucket and needs 29 of them
         // to cover seven days.

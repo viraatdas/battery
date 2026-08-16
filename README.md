@@ -1,18 +1,22 @@
 # BatteryScope
 
-Find out where your Mac's battery actually goes.
+Find out where your Mac's battery — and its responsiveness — actually goes.
 
 macOS tells you a percentage and a vague list of "apps using significant energy."
 It won't tell you that Chrome ate 22% of your charge since lunch, that background
 indexing cost you more than your editor, or that you lost 9% overnight with the lid
-shut. BatteryScope records the data continuously and answers those questions.
+shut. And when the machine locks up for four minutes, it leaves behind no record
+at all of what was resident when it happened. BatteryScope records both,
+continuously, and answers those questions.
 
 ## How it works
 
 ```
   powermetrics (root)  ─┐
                         ├─→  batteryscoped  ─→  SQLite (WAL)  ─→  BatteryScope.app
-  IOKit AppleSmartBattery ┘      sampler          time series        menu bar UI
+  IOKit AppleSmartBattery ┤      sampler          time series        menu bar UI
+                        │
+  process table + VM stats ┘
 ```
 
 Three sources, joined:
@@ -25,6 +29,67 @@ Three sources, joined:
 3. **The join** — measured watt-hours from the battery controller, apportioned across
    processes by energy-impact share, rolled up by app and by category (browser,
    terminal, devtools, media, communication, system, background).
+
+Plus a second, separate axis — why the machine *stalls*, which is not the same
+question as where the battery went. A Mac pinned at full load on AC power hangs
+badly while drawing nothing from the battery at all:
+
+4. **Process table + VM statistics + IOKit** — memory pressure, swap, page-ins,
+   load average, thermal throttling, and disk throughput, sampled every **5
+   seconds**. None of it needs root.
+
+Detection and attribution run at different cadences on purpose. Pressure is
+cheap and small, so it is read every 5 s and a twenty-second stall still leaves
+a trace. The process table is neither, so it is read every 30 s — which is fine,
+because a process holding 12 GB does not appear and vanish inside half a minute.
+
+Alongside every agent session, the sampler keeps the machine's heaviest few
+processes by memory, CPU, and disk, whoever they belong to. That is what lets a
+stall be pinned on Spotlight or Time Machine rather than reported with no
+culprit at all.
+
+### When the sampler itself can't run
+
+The strongest signal is the one that comes from *missing* data. This daemon
+needs about four milliseconds of CPU per tick; a Mac that could not spare it for
+ninety seconds was not slow, it was wedged. Those holes are detected and
+reported as stalls in their own right.
+
+Sleep leaves an identical hole. The two are told apart by the monotonic clock,
+recorded next to the wall clock in every sample: through a hang it advances with
+the wall clock, through sleep it falls well behind.
+
+## Coding agents
+
+Running several coding agents at once is the fastest way to wedge a Mac, and the
+hardest to see: every per-process view shows an undifferentiated pile of
+identical `claude` rows with nothing tying them together.
+
+BatteryScope groups them by process ancestry. An agent process is walked up its
+parent chain; if an orchestrator is found, that orchestrator becomes the session
+root and the session is everything beneath it — the agents, their helpers, and
+the compilers and test runners *they* spawn. So eight `claude` processes read as
+**one Rudder session running eight agents, holding 11 GB**, which is the form the
+question actually gets asked in.
+
+When the machine then stalls, the stall is recorded with whatever sessions were
+resident through it:
+
+> **Your Mac stalled for 4m.** The worst was at 10:11 PM — memory pressure and
+> swap thrash. Rudder was running 6 agents, holding 11.0 GB (46% of memory).
+> Swap grew 3.0 GB.
+
+Attribution is correlational and the wording says so: a session holding memory
+during a stall is evidence, not proof. A session is named only when it held a
+substantial share of the machine, so a stall caused by something else is reported
+as a stall with no culprit rather than blamed on whichever agent was running.
+
+Recognized out of the box: `claude`, `codex`, `aider`, `goose`, `opencode`,
+`amp`, `cursor-agent`, `gemini`, `copilot`, `crush`, `droid`, orchestrated by
+`rudder`, `conductor`, `crystal`, `sculptor`, or `vibe-kanban` — and an agent
+started by hand in a terminal roots a session of its own. Processes are matched
+on `argv[0]` rather than the kernel's `p_comm`, because a tool shipped as a Node
+script reports as `node` there and would otherwise be invisible.
 
 ## Requirements
 
@@ -39,6 +104,11 @@ Build and install the sampler (needs root, because `powermetrics` does):
 sudo ./Scripts/install-daemon.sh
 ```
 
+The installer polls for the daemon to actually come up before printing success
+and prints the log tail if it doesn't, builds and installs a `newsyslog.d` drop-in
+so `daemon.log` rotates instead of growing forever, and fixes up permissions on
+any existing database sidecar files so the app can read them.
+
 Build and open the menu bar app:
 
 ```sh
@@ -51,8 +121,12 @@ the menu bar showing your current draw; click it for the full breakdown.
 
 ### Without root
 
-The daemon is only needed for *per-process* attribution. Battery-level telemetry
-works with no privileges at all:
+The daemon is only needed for *per-process energy* attribution, because
+`powermetrics` needs root. Battery telemetry, system pressure, and agent-session
+grouping all work with no privileges at all — ancestry, resident memory, and CPU
+time come from the process table, which any user can read. So the question "which
+session was holding the machine when it froze" does not wait for anyone to
+install a daemon:
 
 ```sh
 swift build
@@ -79,6 +153,15 @@ screen bright.
 Charging periods and sleep gaps are excluded from drain-rate math rather than
 averaged in, which is why the chart draws holes instead of zeros.
 
+## Limitations
+
+Everything before the daemon was installed is invisible — there's no retroactive
+history, and no sync across machines: each Mac keeps its own local database.
+Per-process attribution needs the root daemon; without it you only get
+battery-level telemetry. Running `powermetrics` continuously costs a small
+amount of power itself, which is included in what gets measured but is worth
+knowing about if you're chasing the last percent.
+
 ## Uninstall
 
 ```sh
@@ -99,7 +182,17 @@ Inspect the database directly:
 
 ```sh
 sqlite3 "/Library/Application Support/BatteryScope/batteryscope.db" \
-  "select count(*) from battery_samples; select count(*) from process_samples;"
+  "select count(*) from battery_samples; select count(*) from process_samples;
+   select count(*) from pressure_samples; select count(*) from agent_samples;"
+```
+
+See which agent sessions are being recorded right now:
+
+```sh
+sqlite3 "/Library/Application Support/BatteryScope/batteryscope.db" \
+  "select name, ppid, resident_bytes/1048576 as mb, round(cpu_ms_per_s/1000, 2) as cores
+   from agent_samples where timestamp_ms = (select max(timestamp_ms) from agent_samples)
+   order by mb desc;"
 ```
 
 The app shows its onboarding pane until at least two samples exist — drain rate
@@ -111,7 +204,12 @@ expect per-app attribution to get more useful the longer you run on battery.
 | Path | What |
 |---|---|
 | `Sources/BatteryCore/` | Models, SQLite store, process categorizer |
-| `Sources/BatteryCore/Analytics/` | Drain series, attribution, health, insights |
+| `Sources/BatteryCore/Analytics/` | Drain series, attribution, health, insights, agent sessions, stalls |
 | `Sources/batteryscoped/` | The sampler daemon |
 | `Sources/BatteryScopeApp/` | SwiftUI menu bar app |
-| `Scripts/` | Daemon install/uninstall, app bundling |
+| `Resources/` | LaunchDaemon plist, log rotation config, app icon |
+| `Scripts/` | Daemon install/uninstall, app bundling, icon generation |
+
+## License
+
+MIT. See [LICENSE](LICENSE).

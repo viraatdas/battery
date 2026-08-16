@@ -48,12 +48,20 @@ struct PopoverView: View {
             .disabled(model.isRefreshing)
             .help("Re-read the sample database now")
 
-            Text("Updated \(Fmt.age(Date().timeIntervalSince(snapshot.generatedAt)))")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .numeric()
+            // A `TimelineView` rather than reading `Date()` in `body`: this
+            // label needs to keep ticking ("just now" → "20s ago" → …) between
+            // refreshes, and a plain `Date()` here only re-evaluates when
+            // something else happens to redraw the toolbar.
+            TimelineView(.periodic(from: snapshot.generatedAt, by: 1)) { context in
+                Text("Updated \(Fmt.age(context.date.timeIntervalSince(snapshot.generatedAt)))")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .numeric()
+            }
 
             Spacer(minLength: 0)
+
+            MoreMenuView(databasePath: snapshot.databasePath)
 
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .buttonStyle(.borderless)
@@ -88,16 +96,45 @@ struct PopoverContent: View {
 
             SectionDivider()
 
+            if !snapshot.hasEverRecordedProcessSamples {
+                ProcessSamplerMissingNotice()
+                SectionDivider()
+            }
+
+            // Pressure sits directly under the chart, above the battery
+            // attribution: when a Mac is stalling, that is the question being
+            // asked, and it should not be below three sections about watts.
+            SystemPressureView(
+                pressure: snapshot.report.pressure,
+                stalls: snapshot.report.stalls,
+                windowTitle: choice.longTitle,
+                diskBytesPerSecond: snapshot.report.diskBytesPerSecond
+            )
+
+            SectionDivider()
+
+            if !snapshot.report.agentSessions.isEmpty {
+                AgentSessionsView(
+                    sessions: snapshot.report.agentSessions,
+                    machine: snapshot.report.machine,
+                    windowTitle: choice.longTitle
+                )
+
+                SectionDivider()
+            }
+
             CategoryBreakdownView(
                 categories: snapshot.report.categories,
-                windowTitle: choice.longTitle
+                windowTitle: choice.longTitle,
+                hasEverRecordedProcessSamples: snapshot.hasEverRecordedProcessSamples
             )
 
             SectionDivider()
 
             TopOffendersView(
                 processes: snapshot.report.processes,
-                windowTitle: choice.longTitle
+                windowTitle: choice.longTitle,
+                hasEverRecordedProcessSamples: snapshot.hasEverRecordedProcessSamples
             )
 
             SectionDivider()

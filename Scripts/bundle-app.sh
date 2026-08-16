@@ -17,7 +17,12 @@ SCRATCH=".build-release"
 APP="dist/BatteryScope.app"
 BINARY_NAME="BatteryScopeApp"
 BUNDLE_ID="com.batteryscope.app"
-VERSION="0.1.0"
+ICON_SOURCE="Resources/AppIcon.icns"
+ICON_NAME="AppIcon"
+
+# Single-sourced from the repo root so the app, the daemon plist comments, and
+# release tooling never drift out of sync with each other.
+VERSION="$(<VERSION)"
 
 echo "==> Building release binary (scratch: $SCRATCH)"
 swift build -c release --scratch-path "$SCRATCH" --product "$BINARY_NAME"
@@ -39,6 +44,12 @@ cp "$BUILT" "$APP/Contents/MacOS/BatteryScope"
 chmod +x "$APP/Contents/MacOS/BatteryScope"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+if [[ ! -f "$ICON_SOURCE" ]]; then
+  echo "error: missing $ICON_SOURCE — run: swift Scripts/make-icon.swift" >&2
+  exit 1
+fi
+cp "$ICON_SOURCE" "$APP/Contents/Resources/${ICON_NAME}.icns"
+
 echo "==> Writing Info.plist"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -49,6 +60,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<string>en</string>
 	<key>CFBundleExecutable</key>
 	<string>BatteryScope</string>
+	<key>CFBundleIconFile</key>
+	<string>${ICON_NAME}.icns</string>
+	<key>CFBundleIconName</key>
+	<string>${ICON_NAME}</string>
 	<key>CFBundleIdentifier</key>
 	<string>$BUNDLE_ID</string>
 	<key>CFBundleInfoDictionaryVersion</key>

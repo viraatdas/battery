@@ -29,5 +29,9 @@ let package = Package(
             name: "BatteryscopedTests",
             dependencies: ["batteryscoped"]
         ),
+        .testTarget(
+            name: "BatteryScopeAppTests",
+            dependencies: ["BatteryScopeApp"]
+        ),
     ]
 )

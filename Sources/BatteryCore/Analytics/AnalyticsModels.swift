@@ -416,6 +416,12 @@ public struct InsightThresholds: Sendable, Hashable, Codable {
     public var minimumDischargeMinutes: Double = 10
     /// Share of the window on battery below which attribution is called thin.
     public var mostlyPluggedInDischargeShare: Double = 0.25
+    /// Share of the machine's memory (or cores) an agent session must hold
+    /// before a stall is named on it, rather than merely reported alongside
+    /// it. Attribution here is correlational, so the bar is deliberately high
+    /// enough that a small session running during someone else's stall is not
+    /// blamed for it.
+    public var attributionShare: Double = 0.35
 
     public init() {}
 }
@@ -424,27 +430,98 @@ public struct InsightThresholds: Sendable, Hashable, Codable {
 public struct AnalyticsOptions: Sendable {
     /// A sample delta longer than this multiple of the nominal interval is sleep.
     public var sleepGapFactor: Double = 3.0
+    /// Absolute floor under the sleep-gap threshold, regardless of what
+    /// `sleepGapFactor` x the nominal interval would otherwise allow. An
+    /// unprivileged sampler getting descheduled for under two minutes is
+    /// ordinary OS scheduling jitter, not the Mac actually sleeping —
+    /// confirmed against a live database sampling every ~20s, where a purely
+    /// relative 3x threshold (60s there) misclassified a whole cluster of
+    /// 74-1239s scheduling gaps as sleep.
+    ///
+    /// This floor alone does not fully clear that cluster — the same live
+    /// database's gap distribution runs a long tail out to 1,239.5s before
+    /// jumping to a handful of clearly distinct events at 1,315.8s+, so a
+    /// floor sized to actually separate them would have to sit well above
+    /// "a couple of minutes" and would also swallow a legitimate ~200s sleep
+    /// gap at a normal 60s cadence (`sleepGapFactor` already covers that
+    /// case correctly on its own). 120s is deliberately conservative: it
+    /// only overrides the relative factor at fast cadences where 3x alone
+    /// is clearly too tight, and leaves the rest of that cluster to
+    /// `sleepGapCoalesceSeconds` and, if still too noisy for a given
+    /// deployment, a higher value here — this is exposed specifically so it
+    /// can be tuned per-cadence rather than hardcoded.
+    public var minimumSleepGapSeconds: Double = 120
+    /// Two sleep gaps separated by less than this much continuous awake time
+    /// are coalesced into one, and the short awake stretch between them is
+    /// folded into the merged sleep period. A Mac waking briefly mid-sleep
+    /// (or the sampler hiccuping again right after a real sleep gap) should
+    /// read as one sleep period, not several — "41 sleep periods" in six
+    /// hours is not a number a person can act on, and it is what turned a
+    /// real drain chart into a near-solid grey field.
+    public var sleepGapCoalesceSeconds: Double = 300
     /// Sample spacing assumed when a window has too few samples to infer one.
     public var assumedSampleIntervalSeconds: Double = 60
     /// Time zone used when an insight names a time of day.
     public var timeZone: TimeZone = .current
-    /// How far back `batteryHealth()` looks to measure a recent drain rate.
+    /// How far back `batteryHealth()` looks for a *sample to report on* —
+    /// cycle count, capacity, charge percent — and the outer bound it will
+    /// widen `recentRateLookbackSeconds` out to if there is truly nothing
+    /// more recent to measure a rate from.
     public var healthLookbackSeconds: TimeInterval = 6 * 3600
+    /// How far back `batteryHealth()` looks, anchored at the *latest sample*
+    /// (not wall-clock `now`, which may be well after the sampler last
+    /// wrote), to measure the drain rate that "time left" and "full charge"
+    /// are based on. Deliberately short: a rate averaged across
+    /// `healthLookbackSeconds` (6h) dilutes a real, current high-power draw
+    /// with however much of that window was idle, asleep, or charging,
+    /// which is how a 45.9 W draw at 63% once read as "10h 24m left" and
+    /// then "52h 47m" instead of the ~1h a reader can check against the
+    /// number on the current-draw line right above it. `batteryHealth()`
+    /// widens this window (doubling, capped at `healthLookbackSeconds`)
+    /// only when it does not yet contain `InsightThresholds
+    /// .minimumDischargeMinutes` of actual discharging time to measure —
+    /// e.g. the Mac has been asleep or plugged in for the whole recent
+    /// window — never merely because a wider window would read differently.
+    public var recentRateLookbackSeconds: TimeInterval = 15 * 60
+    /// Last-resort pack capacity for `DrainAnalyzer`'s power-derived drop
+    /// (see `standaloneFallbackDrop`), used only when a discharging interval
+    /// never gets a real gauge tick to reconcile against (no raw mAh
+    /// capacity to compute a precise one from) — a Mac whose IORegistry
+    /// never exposes `AppleRaw{Current,Max}Capacity`, and — the common case
+    /// in practice — every row written before this capacity data started
+    /// being captured at all (a whole database is this shape until the
+    /// sampler daemon restarts on the new build). 60 Wh sits roughly in the
+    /// middle of the modern MacBook lineup (a 13" MacBook Air packs about
+    /// 52 Wh; a 16" MacBook Pro about 100 Wh) — wrong for any one specific
+    /// machine, but a nonzero rate next to a nonzero wattage is a better
+    /// answer than the literal, self-contradicting zero it replaces.
+    public var nominalPackWattHours: Double = 60
     public var thresholds: InsightThresholds = InsightThresholds()
+    /// Cutoffs deciding when the machine counts as stalled, for
+    /// `Analytics.stalls` and the stall insight.
+    public var stallThresholds: StallThresholds = StallThresholds()
 
     public init() {}
 
     public init(
         sleepGapFactor: Double = 3.0,
+        minimumSleepGapSeconds: Double = 120,
+        sleepGapCoalesceSeconds: Double = 300,
         assumedSampleIntervalSeconds: Double = 60,
         timeZone: TimeZone = .current,
         healthLookbackSeconds: TimeInterval = 6 * 3600,
+        recentRateLookbackSeconds: TimeInterval = 15 * 60,
+        nominalPackWattHours: Double = 60,
         thresholds: InsightThresholds = InsightThresholds()
     ) {
         self.sleepGapFactor = sleepGapFactor
+        self.minimumSleepGapSeconds = minimumSleepGapSeconds
+        self.sleepGapCoalesceSeconds = sleepGapCoalesceSeconds
         self.assumedSampleIntervalSeconds = assumedSampleIntervalSeconds
         self.timeZone = timeZone
         self.healthLookbackSeconds = healthLookbackSeconds
+        self.recentRateLookbackSeconds = recentRateLookbackSeconds
+        self.nominalPackWattHours = nominalPackWattHours
         self.thresholds = thresholds
     }
 }

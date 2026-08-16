@@ -1,3 +1,4 @@
+import SQLite3
 import XCTest
 @testable import BatteryCore
 
@@ -73,6 +74,68 @@ final class StoreTests: XCTestCase {
 
         // Writer keeps writing after the reader attached.
         try writer.insert(batterySample: makeBatterySample(timestampMs: 2_000))
+    }
+
+    /// The shape that broke in practice: the daemon writes, shuts down
+    /// cleanly (WAL checkpointed away, `-wal`/`-shm` gone), and the app then
+    /// opens the database read-only from a process that cannot write to the
+    /// containing directory — exactly `/Library/Application Support/
+    /// BatteryScope` at mode 0755 root:wheel for a non-root reader. A plain
+    /// `SQLITE_OPEN_READONLY` open fails there with `SQLITE_CANTOPEN`
+    /// because the read-only WAL path still probes for a `-shm` file it has
+    /// no permission to create; `SQLiteStore` must fall back to the
+    /// `immutable=1` URI form and still return every row.
+    func testReadOnlyOpenSucceedsAfterCleanCloseInAnUnwritableDirectory() throws {
+        var writer: SQLiteStore? = try SQLiteStore(path: dbPath, mode: .readWrite)
+        let sample = makeBatterySample(timestampMs: 1_000)
+        try writer?.insert(batterySample: sample)
+        writer = nil // deinit closes the connection, checkpointing the WAL.
+
+        // Force the exact on-disk shape regardless of whether this SQLite
+        // build already cleaned these up on close: no WAL/SHM siblings left.
+        for suffix in ["-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: dbPath + suffix)
+        }
+
+        XCTAssertEqual(chmod(tempDir.path, 0o555), 0, "failed to lock down the fixture directory")
+        // Restore write access unconditionally so tearDown can remove tempDir.
+        defer { chmod(tempDir.path, 0o755) }
+
+        let reader = try SQLiteStore(path: dbPath, mode: .readOnly)
+        let fetched = try reader.batterySamples(
+            from: Date(timeIntervalSince1970: 0),
+            to: Date(timeIntervalSince1970: 10)
+        )
+        XCTAssertEqual(fetched, [sample])
+    }
+
+    /// Same fallback, but against a path with the sharper edges: `?` and `#`
+    /// are legal in a macOS filename but have syntactic meaning inside a
+    /// sqlite `file:` URI if left unescaped (a bare `?` would truncate the
+    /// path there; a bare `#` would start a fragment) — either would break
+    /// the immutable-URI fallback silently instead of loudly. The real
+    /// system path already has two spaces (".../Application Support/..."),
+    /// which this also re-covers alongside the sharper characters.
+    func testReadOnlyOpenFallbackHandlesSpacesQuestionMarksAndHashesInThePath() throws {
+        let trickyPath = tempDir.path + "/weird test?db#1.db"
+        var writer: SQLiteStore? = try SQLiteStore(path: trickyPath, mode: .readWrite)
+        let sample = makeBatterySample(timestampMs: 1_000)
+        try writer?.insert(batterySample: sample)
+        writer = nil
+
+        for suffix in ["-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: trickyPath + suffix)
+        }
+
+        XCTAssertEqual(chmod(tempDir.path, 0o555), 0, "failed to lock down the fixture directory")
+        defer { chmod(tempDir.path, 0o755) }
+
+        let reader = try SQLiteStore(path: trickyPath, mode: .readOnly)
+        let fetched = try reader.batterySamples(
+            from: Date(timeIntervalSince1970: 0),
+            to: Date(timeIntervalSince1970: 10)
+        )
+        XCTAssertEqual(fetched, [sample])
     }
 
     // MARK: - Battery sample round-trip
@@ -186,6 +249,31 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(fetched.isEmpty)
     }
 
+    /// The app uses this to tell "the sampler daemon has never run" apart
+    /// from "this window happens to be quiet", and it must answer without
+    /// decoding rows: `process_samples` reaches tens of millions of rows at
+    /// full retention, so the range-fetch-and-check-isEmpty version of this
+    /// question could hang the app.
+    func testHasAnyProcessSamples() throws {
+        let store = try SQLiteStore(path: dbPath, mode: .readWrite)
+        XCTAssertFalse(try store.hasAnyProcessSamples())
+
+        // A battery sample alone is not a process sample: an unprivileged
+        // `batteryscoped` run writes the former and never the latter, which
+        // is exactly the state this predicate has to detect.
+        try store.insert(batterySample: makeBatterySample(timestampMs: 1_000))
+        XCTAssertFalse(try store.hasAnyProcessSamples())
+
+        try store.insert(processSamples: [
+            ProcessSample(timestampMs: 1_000, pid: 1, name: "node", energyImpact: 1, cpuMsPerS: 1, category: .devtools)
+        ])
+        XCTAssertTrue(try store.hasAnyProcessSamples())
+
+        // Answers for a read-only reader too — that is the app's own mode.
+        let reader = try SQLiteStore(path: dbPath, mode: .readOnly)
+        XCTAssertTrue(try reader.hasAnyProcessSamples())
+    }
+
     func testProcessSampleRangeFiltering() throws {
         let store = try SQLiteStore(path: dbPath, mode: .readWrite)
         let mk = { (ts: Int64) in
@@ -231,7 +319,7 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbPath, mode: .readWrite)
         // Reopening applies migrations idempotently and must not throw.
         _ = try SQLiteStore(path: dbPath, mode: .readWrite)
-        XCTAssertEqual(SQLiteStore.schemaVersion, 1)
+        XCTAssertEqual(SQLiteStore.schemaVersion, 5)
     }
 
     func testDefaultDBPathConstant() {
@@ -239,5 +327,121 @@ final class StoreTests: XCTestCase {
             BatteryScopePaths.defaultDBPath,
             "/Library/Application Support/BatteryScope/batteryscope.db"
         )
+    }
+
+    // MARK: - v1 -> v2 migration
+
+    /// Hand-builds a v1-shaped `battery_samples` table (no raw mAh columns,
+    /// `user_version` left at 1) the way a database written before this
+    /// change would look on disk, so the migration path can be exercised
+    /// without depending on the app's own v1 schema staying reachable.
+    private func createV1Database(at path: String) throws {
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        var handle: OpaquePointer?
+        let rc = sqlite3_open_v2(path, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil)
+        guard rc == SQLITE_OK, let db = handle else {
+            // A broken fixture must fail loudly, not skip: this is the exact
+            // migration path the user's live database has to survive, so a
+            // silently-skipped test here is worse than no test at all.
+            let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unable to allocate handle"
+            if let handle { sqlite3_close_v2(handle) }
+            XCTFail("could not open a raw sqlite3 handle for the v1 fixture at \(path) (code \(rc)): \(message)")
+            throw SQLiteStoreError.openFailed(path: path, code: rc, message: message)
+        }
+        defer { sqlite3_close_v2(db) }
+
+        func run(_ sql: String) {
+            XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK, sql)
+        }
+        run("""
+            CREATE TABLE battery_samples (
+                timestamp_ms     INTEGER PRIMARY KEY,
+                percent          REAL    NOT NULL,
+                is_charging      INTEGER NOT NULL,
+                external_power   INTEGER NOT NULL,
+                watts_drawn      REAL    NOT NULL,
+                voltage_mv       INTEGER NOT NULL,
+                amperage_ma      INTEGER NOT NULL,
+                cycle_count      INTEGER NOT NULL,
+                max_capacity_pct REAL    NOT NULL,
+                temperature_c    REAL
+            )
+            """)
+        run("""
+            CREATE TABLE process_samples (
+                timestamp_ms     INTEGER NOT NULL,
+                pid              INTEGER NOT NULL,
+                name             TEXT    NOT NULL,
+                bundle_path_hint TEXT,
+                category         TEXT    NOT NULL,
+                energy_impact    REAL    NOT NULL,
+                cpu_ms_per_s     REAL    NOT NULL
+            )
+            """)
+        run("""
+            INSERT INTO battery_samples
+                (timestamp_ms, percent, is_charging, external_power, watts_drawn,
+                 voltage_mv, amperage_ma, cycle_count, max_capacity_pct, temperature_c)
+            VALUES (1000, 52, 0, 0, -7.42, 12600, -589, 312, 91.3, 31.2)
+            """)
+        run("PRAGMA user_version = 1")
+    }
+
+    func testMigrationAddsRawCapacityColumnsAndPreservesV1Rows() throws {
+        try createV1Database(at: dbPath)
+
+        let store = try SQLiteStore(path: dbPath, mode: .readWrite)
+
+        // The pre-existing v1 row survived, and its new columns are NULL.
+        let rows = try store.batterySamples(
+            from: Date(timeIntervalSince1970: 0),
+            to: Date(timeIntervalSince1970: 10)
+        )
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].timestampMs, 1000)
+        XCTAssertEqual(rows[0].percent, 52)
+        XCTAssertNil(rows[0].rawCurrentMah)
+        XCTAssertNil(rows[0].rawMaxMah)
+
+        // A fresh insert round-trips both new fields.
+        let sample = makeBatterySample(timestampMs: 2000)
+        var withRaw = sample
+        withRaw.rawCurrentMah = 4000
+        withRaw.rawMaxMah = 8033
+        try store.insert(batterySample: withRaw)
+
+        let fetched = try store.batterySamples(
+            from: Date(timeIntervalSince1970: 0),
+            to: Date(timeIntervalSince1970: 10)
+        )
+        let inserted = try XCTUnwrap(fetched.first { $0.timestampMs == 2000 })
+        XCTAssertEqual(inserted.rawCurrentMah, 4000)
+        XCTAssertEqual(inserted.rawMaxMah, 8033)
+
+        // Re-opening (migration re-run) is idempotent: no throw, same data.
+        let reopened = try SQLiteStore(path: dbPath, mode: .readWrite)
+        let reopenedRows = try reopened.batterySamples(
+            from: Date(timeIntervalSince1970: 0),
+            to: Date(timeIntervalSince1970: 10)
+        )
+        XCTAssertEqual(reopenedRows.count, 2)
+    }
+
+    func testReadOnlyOpenOfV1DatabaseDoesNotThrow() throws {
+        try createV1Database(at: dbPath)
+
+        // No migration runs on a .readOnly open, so the columns genuinely
+        // are not there yet — the store must still read the row cleanly.
+        let store = try SQLiteStore(path: dbPath, mode: .readOnly)
+        let rows = try store.batterySamples(
+            from: Date(timeIntervalSince1970: 0),
+            to: Date(timeIntervalSince1970: 10)
+        )
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertNil(rows[0].rawCurrentMah)
+        XCTAssertNil(rows[0].rawMaxMah)
     }
 }
