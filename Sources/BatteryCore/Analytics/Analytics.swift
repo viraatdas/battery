@@ -119,8 +119,13 @@ public struct Analytics: Sendable {
 
         let series = try drainSeries(window: window, bucket: .fifteenMinutes)
         let rate = series.medianPctPerHour ?? series.overallPctPerHour
-        // A zero rate is real (idle on battery) but says nothing about runtime.
-        let usableRate = (rate ?? 0) > 0 ? rate : nil
+        // A zero median is common on a slow drain: the battery reports whole
+        // percentage points, so at a couple of %/hr most quarter-hour buckets
+        // show no change at all. That says nothing about runtime, so fall back to
+        // the whole-window rate before giving up on an estimate entirely.
+        let usableRate = [series.medianPctPerHour, series.overallPctPerHour]
+            .compactMap { $0 }
+            .first { $0 > 0 }
 
         return BatteryHealth(
             cycleCount: latest.cycleCount,

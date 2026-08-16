@@ -52,6 +52,46 @@ final class BatteryHealthTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(health.fullChargeRuntimeHours), 10, accuracy: 0.5)
     }
 
+    func testSlowDrainStillEstimatesRuntimeDespiteAZeroMedian() throws {
+        // Real batteries report whole percentage points. At 2%/hr a quarter-hour
+        // bucket drops 0.5%, which quantizes to no change at all in most buckets,
+        // so the median rate is 0 even though the machine is plainly discharging.
+        // The estimate has to fall back to the whole-window rate rather than
+        // claiming it cannot measure the drain.
+        var samples = Fixtures.run(
+            from: Fixtures.anchor,
+            hours: 6,
+            startPercent: 90,
+            pctPerHour: 0.8,
+            watts: 8
+        )
+        samples = samples.map {
+            BatterySample(
+                timestampMs: $0.timestampMs,
+                percent: $0.percent.rounded(),
+                isCharging: $0.isCharging,
+                externalPower: $0.externalPower,
+                wattsDrawn: $0.wattsDrawn,
+                voltageMv: $0.voltageMv,
+                amperageMa: $0.amperageMa,
+                cycleCount: $0.cycleCount,
+                maxCapacityPct: $0.maxCapacityPct,
+                temperatureC: $0.temperatureC
+            )
+        }
+        let temp = try TempStore()
+        try temp.seed(battery: samples)
+        let analytics = try temp.readOnlyAnalytics()
+        let health = try XCTUnwrap(try analytics.batteryHealth(now: Fixtures.at(Fixtures.hours(6))))
+
+        XCTAssertEqual(try XCTUnwrap(health.medianPctPerHour), 0, accuracy: 0.001)
+        let remaining = try XCTUnwrap(health.estimatedHoursRemaining)
+        XCTAssertGreaterThan(remaining, 0)
+        XCTAssertTrue(remaining.isFinite)
+        // ~85% left at roughly 0.8%/hr runs to a few days, not "unmeasurable".
+        XCTAssertGreaterThan(remaining, 24)
+    }
+
     func testHealthIsNilWhenNothingWasSampledInTheLookback() throws {
         let temp = try TempStore()
         try temp.seed(battery: Fixtures.steadyDrain())
