@@ -201,6 +201,49 @@ final class TerminalTabTests: XCTestCase {
         XCTAssertTrue(EnergyRanking.rank(samples: samples).isEmpty)
     }
 
+    // MARK: - Helper processes
+
+    func testHelperProcessesAreNamedAfterTheAppTheHumanLaunched() {
+        // Copied from a real machine: Arc's renderer is a grandchild whose own
+        // name says neither which app nor which page.
+        let samples = [
+            sample("Arc", pid: 791, ppid: 1, cores: 0.2),
+            sample("Browser Helper (Renderer)", pid: 211, ppid: 791, cores: 3),
+            sample("Browser Helper", pid: 987, ppid: 791, cores: 1),
+        ]
+
+        let ranking = EnergyRanking.rank(samples: samples)
+
+        XCTAssertEqual(ranking.rows.count, 1, "one app, not three anonymous helpers")
+        XCTAssertEqual(ranking.rows.first?.label, "Arc")
+        XCTAssertEqual(ranking.rows.first?.sharePct ?? 0, 100, accuracy: 0.5)
+    }
+
+    func testDaemonsStartedByLaunchdAreTheirOwnRoot() {
+        let samples = [sample("mds_stores", pid: 400, ppid: 1, cores: 3)]
+        let ranking = EnergyRanking.rank(samples: samples)
+        XCTAssertEqual(ranking.rows.first?.label, "mds_stores")
+    }
+
+    func testABrokenChainFallsBackToTheProcessItself() {
+        // The parent was not sampled, so there is nothing better to say.
+        let samples = [sample("Browser Helper (Renderer)", pid: 211, ppid: 791, cores: 3)]
+        let ranking = EnergyRanking.rank(samples: samples)
+        XCTAssertEqual(ranking.rows.first?.label, "Browser Helper (Renderer)")
+    }
+
+    func testWorkStartedInATabIsNotClaimedByTheTerminalApp() {
+        // The walk stops at a terminal: a tab's work belongs to the tab, and
+        // must never roll up into "ghostty".
+        let samples = [ghostty]
+            + tab(loginPid: 1161, shellPid: 1162, directory: "/Users/viraat/code/battery",
+                  command: (name: "claude", pid: 1329, cores: 4))
+
+        let ranking = EnergyRanking.rank(samples: samples)
+        XCTAssertEqual(ranking.rows.first?.kind, .terminalTab)
+        XCTAssertEqual(ranking.rows.first?.label, "battery")
+    }
+
     func testSharesAreRelativeToWhatIsListed() {
         let samples = [ghostty]
             + tab(loginPid: 1161, shellPid: 1162, directory: "/Users/viraat/code/battery",

@@ -78,6 +78,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   core, and ranking those produces a confident list of `distnoted` and
   `suggestd` that means nothing.
 - Diagnosis panels now appear only when there is something to report.
+- Helper processes are named after the app the human launched. A row reading
+  "Browser Helper (Renderer)" names neither the app nor the page; walking up to
+  the process just below `launchd` recovers "Arc", because that is where a
+  user-launched app sits. Daemons `launchd` started directly are already their
+  own root, and work started in a terminal still belongs to its tab — the walk
+  stops at a terminal rather than rolling a tab up into "ghostty".
+- Each kept process's ancestors are recorded too, so that walk has a chain to
+  follow. They cost nothing and would never survive a top-N cut.
 
 ### Removed
 
@@ -87,6 +95,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Executables installed under a version directory were named after the version.
+  Claude Code lives at `~/.local/share/claude/versions/2.1.233`, so `argv[0]`'s
+  last component is a version number: it listed as `2.1.233`, which names
+  nothing, and kept every Claude Code process out of the agent roster entirely.
+  When the last path component says nothing, the name now comes from the first
+  segment above it that does.
 - **Every CPU figure was about 42x too low.** `proc_taskinfo` reports CPU time
   in mach absolute time units, not nanoseconds, and the two differ by the
   platform timebase — 125/3 on Apple Silicon, 1/1 on Intel, which is why

@@ -83,6 +83,9 @@ public enum EnergyRanking {
                 )
             }
 
+            var byPid: [Int32: ProcessSample] = [:]
+            for sample in tick where sample.pid >= 0 { byPid[sample.pid] = sample }
+
             for sample in tick where !claimed.contains(sample.pid) {
                 // The terminal's own process is what draws the tabs listed
                 // above it. Showing it as their peer invites exactly the
@@ -91,9 +94,10 @@ public enum EnergyRanking {
                 if TerminalTabs.isTerminal(name: sample.name) { continue }
                 let cost = hasEnergy ? sample.energyImpact : sample.cpuCores
                 guard cost > 0 else { continue }
+                let launched = launchedApp(for: sample, in: byPid)
                 let name = AppNameNormalizer.canonicalName(
-                    for: sample.name,
-                    bundlePathHint: sample.bundlePathHint
+                    for: launched.name,
+                    bundlePathHint: launched.bundlePathHint
                 )
                 merge(
                     into: &accumulated,
@@ -103,7 +107,7 @@ public enum EnergyRanking {
                         label: name,
                         detail: nil,
                         kind: .application,
-                        category: sample.category,
+                        category: launched.category,
                         cost: cost,
                         residentBytes: sample.residentBytes
                     )
@@ -135,6 +139,39 @@ public enum EnergyRanking {
             }
 
         return Result(basis: basis, rows: Array(ranked))
+    }
+
+    /// The process the *human* started, which is the one worth naming.
+    ///
+    /// Modern apps fan out into helpers with names that mean nothing on their
+    /// own — "Browser Helper (Renderer)" tells you neither which app nor which
+    /// page. Walking up to the process just below `launchd` recovers the
+    /// answer, because that is where a user-launched app sits: the renderer's
+    /// parent is Arc, and Arc's parent is launchd.
+    ///
+    /// Falls back to the process itself when the chain cannot be followed —
+    /// a daemon launchd started directly is already its own root, and a
+    /// process whose ancestors were not sampled has nothing better to offer.
+    static func launchedApp(
+        for sample: ProcessSample,
+        in byPid: [Int32: ProcessSample]
+    ) -> ProcessSample {
+        var current = sample
+        var seen: Set<Int32> = [sample.pid]
+        var depth = 0
+        while depth < 24,
+              let ppid = current.ppid,
+              ppid > 1,
+              !seen.contains(ppid),
+              let parent = byPid[ppid] {
+            // A terminal is a launcher, not the launched thing: work started in
+            // a tab belongs to the tab, which is handled before this is reached.
+            if TerminalTabs.isTerminal(name: parent.name) { return current }
+            seen.insert(ppid)
+            current = parent
+            depth += 1
+        }
+        return current
     }
 
     private static func merge(into accumulated: inout [String: Row], key: String, row: Row) {

@@ -115,6 +115,11 @@ recording permission, and without asking the terminal anything. The label is the
 folder the tab is sitting in, which is also where the terminal gets the title it
 shows you. Everything spawned inside the tab, however deep, counts toward it.
 
+Everything else is named after **the app you launched**, not the helper doing the
+work: an Arc renderer is walked up to `Arc`, because the process just below
+`launchd` is what a person actually started. "Browser Helper (Renderer)" answers
+no question worth asking.
+
 Below that, the day in **five-minute slices**. Click any one and it opens: what
 was running during those five minutes. Slices where the machine stalled are red.
 

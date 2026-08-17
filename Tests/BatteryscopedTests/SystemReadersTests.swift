@@ -90,11 +90,51 @@ final class SystemReadersTests: XCTestCase {
         // p_comm calls them `node`; argv[0] calls them what they are. Verified
         // here against the test process itself, whose argv[0] is the test
         // runner rather than `swift`.
+        //
+        // `argumentZero` hands back the path as written — naming it is
+        // `displayName(fromPath:)`'s job, because the last component is not
+        // always the answer.
         var buffer = [UInt8](repeating: 0, count: ProcessTableReader.argumentMaximum())
-        let name = ProcessTableReader.argumentZero(ofPid: getpid(), buffer: &buffer)
-        XCTAssertNotNil(name)
-        XCTAssertFalse(name?.contains("/") ?? true, "the basename, not the whole path")
-        XCTAssertFalse(name?.isEmpty ?? true)
+        let path = ProcessTableReader.argumentZero(ofPid: getpid(), buffer: &buffer)
+        XCTAssertNotNil(path)
+        XCTAssertFalse(path?.isEmpty ?? true)
+
+        let name = ProcessTableReader.displayName(fromPath: path ?? "")
+        XCTAssertFalse(name.contains("/"), "a name, not a path")
+        XCTAssertFalse(name.isEmpty)
+    }
+
+    func testVersionNumberedExecutablesAreNamedAfterTheProgram() {
+        // Claude Code installs itself as .../claude/versions/2.1.233, so the
+        // last path component is a version number. It showed up in the power
+        // list as "2.1.233" and was invisible to the agent roster.
+        XCTAssertEqual(
+            ProcessTableReader.displayName(
+                fromPath: "/Users/viraat/.local/share/claude/versions/2.1.233"
+            ),
+            "claude"
+        )
+    }
+
+    func testOrdinaryPathsKeepTheirLastComponent() {
+        XCTAssertEqual(
+            ProcessTableReader.displayName(fromPath: "/Applications/Arc.app/Contents/MacOS/Arc"),
+            "Arc"
+        )
+        XCTAssertEqual(
+            ProcessTableReader.displayName(
+                fromPath: "/opt/homebrew/lib/node_modules/@viraatdas/rudder/dist/native/darwin-arm64/rudder-native"
+            ),
+            "rudder-native"
+        )
+        XCTAssertEqual(ProcessTableReader.displayName(fromPath: "/bin/zsh"), "zsh")
+        XCTAssertEqual(ProcessTableReader.displayName(fromPath: "claude"), "claude")
+    }
+
+    func testAVersionedNameStillResolvesToSomething() {
+        // Nothing informative anywhere in the path: keep the last component
+        // rather than returning an empty label.
+        XCTAssertEqual(ProcessTableReader.displayName(fromPath: "/bin/1.2.3"), "1.2.3")
     }
 
     func testArgumentMaximumIsSane() {

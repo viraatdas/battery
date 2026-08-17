@@ -115,9 +115,43 @@ public enum ProcessTableReader {
     /// processes `ps` calls `claude`.
     static func name(of process: kinfo_proc, buffer: inout [UInt8]) -> String {
         if let argv0 = argumentZero(ofPid: process.kp_proc.p_pid, buffer: &buffer) {
-            return argv0
+            return displayName(fromPath: argv0)
         }
         return commandName(of: process)
+    }
+
+    /// Path segments that name a location rather than a program, and so are
+    /// never the answer to "what is this".
+    static let uninformativeSegments: Set<String> = [
+        "versions", "version", "current", "bin", "sbin", "libexec", "lib",
+        "contents", "macos", "resources", "helpers", "frameworks",
+        "node_modules", "dist", "build", "out", "target", "release", "debug",
+        ".local", "share", "opt", "usr", "local",
+    ]
+
+    /// The name worth showing for an executable path.
+    ///
+    /// Usually the last component, but not always: Claude Code installs itself
+    /// as `~/.local/share/claude/versions/2.1.233`, so the last component is a
+    /// version number and the rows read `2.1.233` — which names neither the
+    /// program nor anything a person could act on, and kept it out of the agent
+    /// roster entirely. When the last component says nothing, walk back up the
+    /// path to the first segment that does.
+    static func displayName(fromPath path: String) -> String {
+        let components = path.split(separator: "/").map(String.init)
+        guard let last = components.last, !last.isEmpty else { return path }
+        guard isUninformative(last) else { return last }
+        for component in components.dropLast().reversed() where !isUninformative(component) {
+            return component
+        }
+        return last
+    }
+
+    static func isUninformative(_ component: String) -> Bool {
+        if uninformativeSegments.contains(component.lowercased()) { return true }
+        // A bare version: digits and dots, with at least one dot.
+        return component.contains(".")
+            && component.allSatisfy { $0.isNumber || $0 == "." }
     }
 
     /// The platform's mach-time to nanosecond ratio, read once.
@@ -155,7 +189,8 @@ public enum ProcessTableReader {
         return Int(value)
     }
 
-    /// Basename of `argv[0]` for one pid, via `KERN_PROCARGS2`.
+    /// `argv[0]` for one pid, via `KERN_PROCARGS2`, as written — see
+    /// `displayName(fromPath:)` for turning it into a name.
     ///
     /// Returns `nil` when the kernel refuses — reading another user's arguments
     /// requires privilege, so an unprivileged sampler gets this for its own
@@ -181,12 +216,7 @@ public enum ProcessTableReader {
         guard start < index else { return nil }
 
         let argument = String(decoding: buffer[start..<index], as: UTF8.self)
-        guard !argument.isEmpty else { return nil }
-        if let slash = argument.lastIndex(of: "/") {
-            let base = String(argument[argument.index(after: slash)...])
-            return base.isEmpty ? nil : base
-        }
-        return argument
+        return argument.isEmpty ? nil : argument
     }
 
     /// `sysctl(KERN_PROC_ALL)` into a right-sized buffer.
@@ -333,6 +363,17 @@ public enum ProcessTableReader {
         keep.formUnion(topPids(candidates) { $0.cpuMsPerS })
         keep.formUnion(topPids(candidates) { $0.diskBytesPerS ?? 0 })
 
+        // Keep each survivor's ancestors too. They usually cost nothing and
+        // would never survive a top-N cut, but without them a helper cannot be
+        // walked back to the app the human actually launched — a renderer row
+        // reading "Browser Helper (Renderer)" instead of "Arc" is what a broken
+        // chain looks like. A handful of extra rows per tick buys that.
+        var ancestors: Set<Int32> = []
+        for pid in keep {
+            ancestors.formUnion(ancestorPids(of: pid, in: snapshot))
+        }
+        keep.formUnion(ancestors)
+
         return attachWorkingDirectories(to: candidates.filter { keep.contains($0.pid) })
     }
 
@@ -457,6 +498,25 @@ public enum ProcessTableReader {
             updated.workingDirectory = directory
             return updated
         }
+    }
+
+    /// Every ancestor of `pid`, up to but not including `launchd`.
+    static func ancestorPids(of pid: Int32, in snapshot: [Int32: Entry]) -> [Int32] {
+        var result: [Int32] = []
+        var seen: Set<Int32> = [pid]
+        var current = snapshot[pid]
+        var depth = 0
+        while depth < maxAncestorDepth,
+              let entry = current,
+              entry.ppid > 1,
+              !seen.contains(entry.ppid),
+              let parent = snapshot[entry.ppid] {
+            result.append(parent.pid)
+            seen.insert(parent.pid)
+            current = parent
+            depth += 1
+        }
+        return result
     }
 
     /// Every pid whose ancestor chain reaches `root`, plus `root` itself.
