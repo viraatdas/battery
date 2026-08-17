@@ -345,7 +345,12 @@ public enum StallAnalyzer {
                 expected * thresholds.starvationGapFactor,
                 thresholds.minimumStarvationGapSeconds
             )
-            if expected > 0, wallSeconds > allowed {
+            // A hole left by a sampler that was not running is not a stall.
+            // Restarts, reinstalls, and quitting the app all produce exactly
+            // the gap shape a wedged machine does; the sampler run identity is
+            // what separates them.
+            let sameRun = sample.isSameSamplerRun(as: previous)
+            if sameRun, expected > 0, wallSeconds > allowed {
                 // Sleep leaves the same hole. The monotonic clock is what tells
                 // them apart: through a hang it advances with the wall clock,
                 // through sleep it falls well behind.

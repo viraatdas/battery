@@ -89,6 +89,17 @@ final class AppModel: ObservableObject {
         didSet { if oldValue != choice { refresh() } }
     }
     @Published var metric: ChartData.Metric = .watts
+    @Published var activityMetric: ActivityMetric = .cpu
+
+    /// Start of the activity slice the user has open, if any.
+    @Published var selectedSlice: Date? {
+        didSet { if oldValue != selectedSlice { loadBreakdown() } }
+    }
+
+    /// The open slice's detail. Loaded on demand — a breakdown is one small
+    /// query per click, not something worth computing for every slice up front.
+    @Published private(set) var breakdown: ActivityBreakdown?
+    @Published private(set) var isLoadingBreakdown = false
 
     private var timer: Timer?
     private var inFlight = false
@@ -132,6 +143,12 @@ final class AppModel: ObservableObject {
                 self.outcome = result
                 self.inFlight = false
                 self.isRefreshing = false
+                // A window change can drop the open slice out of range; leaving
+                // it selected would show detail for a bar that is not there.
+                if let selected = self.selectedSlice,
+                   self.snapshot?.report.activity.contains(where: { $0.start == selected }) != true {
+                    self.selectedSlice = nil
+                }
                 if self.refreshPending {
                     self.refreshPending = false
                     self.refresh()
@@ -144,6 +161,46 @@ final class AppModel: ObservableObject {
     /// offscreen self-test so it can render a known state.
     func applyForTesting(_ outcome: LoadOutcome) {
         self.outcome = outcome
+    }
+
+    // MARK: - Slice detail
+
+    /// Reads the open slice's breakdown off the main actor.
+    ///
+    /// Clearing the selection clears the panel immediately rather than leaving
+    /// the previous slice's rows on screen while nothing is selected.
+    private func loadBreakdown() {
+        guard let start = selectedSlice,
+              let snapshot,
+              let slice = snapshot.report.activity.first(where: { $0.start == start })
+        else {
+            breakdown = nil
+            isLoadingBreakdown = false
+            return
+        }
+
+        isLoadingBreakdown = true
+        let path = snapshot.databasePath
+        Task.detached(priority: .userInitiated) {
+            let loaded = AppModel.loadBreakdown(databasePath: path, slice: slice)
+            await MainActor.run {
+                // The user may have moved on while this was in flight.
+                guard self.selectedSlice == start else { return }
+                self.breakdown = loaded
+                self.isLoadingBreakdown = false
+            }
+        }
+    }
+
+    nonisolated static func loadBreakdown(
+        databasePath: String,
+        slice: ActivitySlice
+    ) -> ActivityBreakdown? {
+        do {
+            return try Analytics(readOnlyPath: databasePath).breakdown(for: slice)
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Loading

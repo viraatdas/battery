@@ -26,7 +26,11 @@ struct PopoverView: View {
                 PopoverContent(
                     snapshot: snapshot,
                     choice: $model.choice,
-                    metric: $model.metric
+                    metric: $model.metric,
+                    activityMetric: $model.activityMetric,
+                    selectedSlice: $model.selectedSlice,
+                    breakdown: model.breakdown,
+                    isLoadingBreakdown: model.isLoadingBreakdown
                 )
             }
             .frame(maxHeight: Metrics.popoverMaxHeight)
@@ -81,6 +85,10 @@ struct PopoverContent: View {
     var snapshot: Snapshot
     @Binding var choice: WindowChoice
     @Binding var metric: ChartData.Metric
+    var activityMetric: Binding<ActivityMetric> = .constant(.cpu)
+    var selectedSlice: Binding<Date?> = .constant(nil)
+    var breakdown: ActivityBreakdown?
+    var isLoadingBreakdown = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
@@ -88,11 +96,26 @@ struct PopoverContent: View {
 
             SectionDivider()
 
-            DrainChartView(
-                series: snapshot.report.series,
-                metric: $metric,
-                choice: $choice
+            ActivityChartView(
+                slices: snapshot.report.activity,
+                machine: snapshot.report.machine,
+                metric: activityMetric,
+                selection: selectedSlice,
+                choice: $choice,
+                window: snapshot.report.window,
+                windowTitle: choice.longTitle
             )
+
+            // Only once a bar is open: an empty detail panel under every chart
+            // is noise, and the chart's own footnote already says to click.
+            if breakdown != nil || isLoadingBreakdown {
+                SectionDivider()
+                SliceBreakdownView(
+                    breakdown: breakdown,
+                    isLoading: isLoadingBreakdown,
+                    onDismiss: { selectedSlice.wrappedValue = nil }
+                )
+            }
 
             SectionDivider()
 
@@ -147,6 +170,17 @@ struct PopoverContent: View {
             SectionDivider()
 
             BatteryHealthView(health: snapshot.report.health)
+
+            SectionDivider()
+
+            // Battery level and drain rate over time. Kept below the activity
+            // chart because it answers the slower question — what happened to
+            // the charge — rather than "what is this machine doing right now".
+            DrainChartView(
+                series: snapshot.report.series,
+                metric: $metric,
+                choice: $choice
+            )
         }
         .padding(.bottom, Metrics.sectionSpacing)
     }

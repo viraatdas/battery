@@ -94,6 +94,23 @@ enum SelfTest {
             stalls: [],
             windowTitle: "the last 6 hours"
         ))
+        // A populated day with a slice open. Real data takes hours to look like
+        // this, and the drill-down is the whole point of the chart.
+        check("activity/day", ActivityChartView(
+            slices: SelfTestFixtures.day,
+            machine: SelfTestFixtures.machine,
+            metric: .constant(.cpu),
+            selection: .constant(SelfTestFixtures.busiestSliceStart),
+            choice: .constant(.last24Hours),
+            window: SelfTestFixtures.dayWindow,
+            windowTitle: "the last 24 hours"
+        ))
+        check("activity/breakdown", SliceBreakdownView(
+            breakdown: SelfTestFixtures.breakdown,
+            isLoading: false,
+            onDismiss: {}
+        ))
+
         check("agents/sessions", AgentSessionsView(
             sessions: SelfTestFixtures.sessions,
             machine: SelfTestFixtures.machine,
@@ -210,6 +227,78 @@ enum SelfTestFixtures {
             ]
         ),
     ]
+
+    /// A day of five-minute slices with a realistic shape: quiet overnight, a
+    /// working day, and one bad spike that stalled the machine.
+    static let dayWindow: TimeWindow = {
+        let end = ActivityTimeline.align(Date(), to: 300)
+        return TimeWindow(start: end.addingTimeInterval(-24 * 3600), end: end)
+    }()
+
+    static let day: [ActivitySlice] = {
+        var slices: [ActivitySlice] = []
+        let count = Int(24 * 3600 / 300)
+        for index in 0..<count {
+            let start = dayWindow.start.addingTimeInterval(Double(index) * 300)
+            let hour = Calendar(identifier: .gregorian).component(.hour, from: start)
+            // Overnight idles, the working day runs warm, and one spike bites.
+            var cores: Double
+            switch hour {
+            case 0..<7: cores = 0.4
+            case 7..<9: cores = 1.6
+            case 9..<18: cores = 3.2
+            default: cores = 2.1
+            }
+            let isSpike = index >= count - 40 && index < count - 34
+            if isSpike { cores = 11.5 }
+
+            slices.append(ActivitySlice(
+                start: start,
+                end: start.addingTimeInterval(300),
+                meanCPUCores: cores,
+                peakCPUCores: cores * 1.4,
+                meanMemoryUsedFraction: isSpike ? 0.96 : 0.62,
+                peakMemoryUsedFraction: isSpike ? 0.99 : 0.7,
+                meanDiskBytesPerS: isSpike ? 180 * 1024 * 1024 : 4 * 1024 * 1024,
+                peakDiskBytesPerS: isSpike ? 420 * 1024 * 1024 : 20 * 1024 * 1024,
+                meanWatts: hour >= 9 && hour < 18 ? 18 + cores : nil,
+                energyWh: hour >= 9 && hour < 18 ? (18 + cores) * 300 / 3600 : nil,
+                dischargingSeconds: hour >= 9 && hour < 18 ? 300 : 0,
+                externalPowerSeconds: hour >= 9 && hour < 18 ? 0 : 300,
+                worstMemoryLevel: isSpike ? .critical : .nominal,
+                worstThermalLevel: isSpike ? .serious : .nominal,
+                peakSwapUsedBytes: isSpike ? 5 * gigabyte : 0,
+                stallSeverity: isSpike ? .critical : nil,
+                sampleCount: 60
+            ))
+        }
+        return slices
+    }()
+
+    static var busiestSliceStart: Date {
+        day.max { ($0.meanCPUCores ?? 0) < ($1.meanCPUCores ?? 0) }?.start ?? dayWindow.start
+    }
+
+    static var breakdown: ActivityBreakdown {
+        let slice = day.first { $0.start == busiestSliceStart } ?? day[0]
+        return ActivityBreakdown(
+            slice: slice,
+            basis: .cpuAndMemory,
+            isComplete: false,
+            rows: [
+                .init(name: "claude", category: .devtools, energyImpact: 0, peakCPUCores: 4.2,
+                      peakResidentBytes: 1_800 * 1024 * 1024, peakDiskBytesPerS: nil, sharePct: 30),
+                .init(name: "swift-frontend", category: .devtools, energyImpact: 0, peakCPUCores: 3.6,
+                      peakResidentBytes: 2_100 * 1024 * 1024, peakDiskBytesPerS: nil, sharePct: 26),
+                .init(name: "mds_stores", category: .system, energyImpact: 0, peakCPUCores: 2.1,
+                      peakResidentBytes: 620 * 1024 * 1024,
+                      peakDiskBytesPerS: 190 * 1024 * 1024, sharePct: 15),
+                .init(name: "Arc", category: .browser, energyImpact: 0, peakCPUCores: 1.1,
+                      peakResidentBytes: 900 * 1024 * 1024, peakDiskBytesPerS: nil, sharePct: 8),
+            ],
+            sessions: sessions
+        )
+    }
 
     static var sessions: [AgentSession] {
         AgentSessions.sessions(samples: [

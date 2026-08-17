@@ -225,6 +225,25 @@ public struct PressureSample: Codable, Sendable, Hashable {
     /// rather than assumed so a gap can be judged against the interval actually
     /// in force, which is configurable and has changed across versions.
     public var intervalSeconds: Double
+    /// Cumulative CPU ticks spent doing work, and idle, across all cores since
+    /// boot.
+    ///
+    /// Differenced between two samples these give true machine-wide CPU
+    /// utilisation, which is what "how hard was this Mac working" actually
+    /// means. The load average stored alongside is a *queue length* — useful
+    /// for spotting oversubscription, useless as a measure of work done, since
+    /// it says nothing about whether those threads got any CPU.
+    public var cpuTicksUsed: Int64
+    public var cpuTicksIdle: Int64
+    /// `uptimeSeconds` at the moment the sampler process started.
+    ///
+    /// Identifies the sampler *run* that produced this sample, which is what
+    /// separates the two very different reasons for a hole in the data. If the
+    /// run either side of a gap is the same, the sampler was alive the whole
+    /// time and could not get scheduled — a genuine stall. If the run changed,
+    /// the sampler was simply not running: quit, reinstalled, or restarted.
+    /// Without this the second case reports as the first, which it did.
+    public var samplerStartUptime: Double
 
     public init(
         timestampMs: Int64,
@@ -240,7 +259,10 @@ public struct PressureSample: Codable, Sendable, Hashable {
         uptimeSeconds: Double = 0,
         diskReadBytes: Int64 = 0,
         diskWriteBytes: Int64 = 0,
-        intervalSeconds: Double = 0
+        intervalSeconds: Double = 0,
+        samplerStartUptime: Double = 0,
+        cpuTicksUsed: Int64 = 0,
+        cpuTicksIdle: Int64 = 0
     ) {
         self.timestampMs = timestampMs
         self.memoryLevel = memoryLevel
@@ -256,6 +278,35 @@ public struct PressureSample: Codable, Sendable, Hashable {
         self.diskReadBytes = diskReadBytes
         self.diskWriteBytes = diskWriteBytes
         self.intervalSeconds = intervalSeconds
+        self.samplerStartUptime = samplerStartUptime
+        self.cpuTicksUsed = cpuTicksUsed
+        self.cpuTicksIdle = cpuTicksIdle
+    }
+
+    /// Machine-wide CPU utilisation between `previous` and this sample, as a
+    /// fraction of all cores, 0...1. `nil` when the tick counters are missing
+    /// or did not advance — a counter that went backwards means a reboot.
+    public func cpuUtilisation(since previous: PressureSample) -> Double? {
+        let used = cpuTicksUsed - previous.cpuTicksUsed
+        let idle = cpuTicksIdle - previous.cpuTicksIdle
+        guard used >= 0, idle >= 0 else { return nil }
+        let total = used + idle
+        guard total > 0 else { return nil }
+        return min(max(Double(used) / Double(total), 0), 1)
+    }
+
+    /// The same as a number of fully busy cores.
+    public func cpuCoresBusy(since previous: PressureSample) -> Double? {
+        guard cpuCount > 0, let utilisation = cpuUtilisation(since: previous) else { return nil }
+        return utilisation * Double(cpuCount)
+    }
+
+    /// Whether `other` was written by the same sampler run as this sample.
+    /// Unknown (both zero) counts as the same run, so pre-v6 data keeps its
+    /// old, more permissive behaviour rather than silently losing stalls.
+    public func isSameSamplerRun(as other: PressureSample) -> Bool {
+        guard samplerStartUptime > 0, other.samplerStartUptime > 0 else { return true }
+        return abs(samplerStartUptime - other.samplerStartUptime) < 1
     }
 
     /// Runnable work per core. Above 1.0 means more threads want CPU than the

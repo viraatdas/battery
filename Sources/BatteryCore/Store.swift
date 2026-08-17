@@ -78,7 +78,12 @@ public final class SQLiteStore: @unchecked Sendable {
     /// was recorded with no culprit at all. Adds per-process disk rates, and
     /// widens `pressure_samples` with monotonic uptime, system-wide disk
     /// counters, and the sampler's intended cadence.
-    public static let schemaVersion: Int32 = 5
+    ///
+    /// v6 adds `sampler_start_uptime` to `pressure_samples`, identifying which
+    /// sampler *run* wrote each row. Without it a sampler that was simply not
+    /// running is indistinguishable from one the machine was too busy to
+    /// schedule, and every restart reported as a stall.
+    public static let schemaVersion: Int32 = 6
 
     private let db: OpaquePointer
     private let lock = NSLock()
@@ -102,6 +107,8 @@ public final class SQLiteStore: @unchecked Sendable {
     private var hasTrackedTable = false
     /// Whether `pressure_samples` has the v5 uptime/disk/interval columns.
     private var hasPressureDetailColumns = false
+    /// Whether `pressure_samples` has the v6 `sampler_start_uptime` column.
+    private var hasSamplerRunColumn = false
 
     // Destructor telling SQLite to copy bound text immediately.
     private static let transientDestructor = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -170,8 +177,11 @@ public final class SQLiteStore: @unchecked Sendable {
                 processColumns.contains("ppid") && processColumns.contains("resident_bytes")
             hasPressureTable = try !columnNames(of: "pressure_samples").isEmpty
             hasTrackedTable = try !columnNames(of: "tracked_samples").isEmpty
-            hasPressureDetailColumns = try columnNames(of: "pressure_samples")
+            let pressureColumns = try columnNames(of: "pressure_samples")
+            hasPressureDetailColumns = pressureColumns
                 .isSuperset(of: ["uptime_seconds", "disk_read_bytes", "disk_write_bytes", "interval_seconds"])
+            hasSamplerRunColumn = pressureColumns
+                .isSuperset(of: ["sampler_start_uptime", "cpu_ticks_used", "cpu_ticks_idle"])
         } catch {
             sqlite3_close_v2(opened)
             throw error
@@ -327,6 +337,11 @@ public final class SQLiteStore: @unchecked Sendable {
                     try exec("DROP TABLE agent_samples")
                 }
                 for column in ["uptime_seconds", "disk_read_bytes", "disk_write_bytes", "interval_seconds"] {
+                    try addColumnIfMissing(table: "pressure_samples", column: column, type: "REAL")
+                }
+            }
+            if version < 6 {
+                for column in ["sampler_start_uptime", "cpu_ticks_used", "cpu_ticks_idle"] {
                     try addColumnIfMissing(table: "pressure_samples", column: column, type: "REAL")
                 }
             }
@@ -598,9 +613,13 @@ public final class SQLiteStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        let detailColumns = hasPressureDetailColumns
+        var detailColumns = hasPressureDetailColumns
             ? ", uptime_seconds, disk_read_bytes, disk_write_bytes, interval_seconds" : ""
-        let detailPlaceholders = hasPressureDetailColumns ? ", ?, ?, ?, ?" : ""
+        var detailPlaceholders = hasPressureDetailColumns ? ", ?, ?, ?, ?" : ""
+        if hasSamplerRunColumn {
+            detailColumns += ", sampler_start_uptime, cpu_ticks_used, cpu_ticks_idle"
+            detailPlaceholders += ", ?, ?, ?"
+        }
         let sql = """
             INSERT OR REPLACE INTO pressure_samples
                 (timestamp_ms, memory_level, thermal_level, total_memory, available_memory,
@@ -625,6 +644,12 @@ public final class SQLiteStore: @unchecked Sendable {
             sqlite3_bind_double(statement, 12, Double(sample.diskReadBytes))
             sqlite3_bind_double(statement, 13, Double(sample.diskWriteBytes))
             sqlite3_bind_double(statement, 14, sample.intervalSeconds)
+        }
+        if hasSamplerRunColumn {
+            let base: Int32 = hasPressureDetailColumns ? 15 : 11
+            sqlite3_bind_double(statement, base, sample.samplerStartUptime)
+            sqlite3_bind_double(statement, base + 1, Double(sample.cpuTicksUsed))
+            sqlite3_bind_double(statement, base + 2, Double(sample.cpuTicksIdle))
         }
 
         guard sqlite3_step(statement) == SQLITE_DONE else {
@@ -802,8 +827,11 @@ public final class SQLiteStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        let detailColumns = hasPressureDetailColumns
+        var detailColumns = hasPressureDetailColumns
             ? ", uptime_seconds, disk_read_bytes, disk_write_bytes, interval_seconds" : ""
+        if hasSamplerRunColumn {
+            detailColumns += ", sampler_start_uptime, cpu_ticks_used, cpu_ticks_idle"
+        }
         let sql = """
             SELECT timestamp_ms, memory_level, thermal_level, total_memory, available_memory,
                    compressed_bytes, swap_used_bytes, page_ins, load_average_1m, cpu_count\(detailColumns)
@@ -841,7 +869,13 @@ public final class SQLiteStore: @unchecked Sendable {
                     ? Int64(sqlite3_column_double(statement, 11)) : 0,
                 diskWriteBytes: hasPressureDetailColumns
                     ? Int64(sqlite3_column_double(statement, 12)) : 0,
-                intervalSeconds: hasPressureDetailColumns ? sqlite3_column_double(statement, 13) : 0
+                intervalSeconds: hasPressureDetailColumns ? sqlite3_column_double(statement, 13) : 0,
+                samplerStartUptime: hasSamplerRunColumn
+                    ? sqlite3_column_double(statement, hasPressureDetailColumns ? 14 : 10) : 0,
+                cpuTicksUsed: hasSamplerRunColumn
+                    ? Int64(sqlite3_column_double(statement, hasPressureDetailColumns ? 15 : 11)) : 0,
+                cpuTicksIdle: hasSamplerRunColumn
+                    ? Int64(sqlite3_column_double(statement, hasPressureDetailColumns ? 16 : 12)) : 0
             ))
         }
         return results

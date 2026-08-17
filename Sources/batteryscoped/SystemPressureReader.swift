@@ -13,6 +13,11 @@ import IOKit.storage
 /// most often asked by someone who has not installed anything yet.
 public enum SystemPressureReader {
 
+    /// Monotonic uptime at the moment this process started, captured once.
+    /// Stamped onto every sample so the analysis can tell one sampler run from
+    /// the next — see `PressureSample.samplerStartUptime`.
+    public static let processStartUptime = ProcessInfo.processInfo.systemUptime
+
     /// Takes one reading. Never throws: any field the kernel declines to
     /// report falls back to a value that reads as "nothing to see", so a
     /// partial reading is still written rather than lost.
@@ -38,6 +43,7 @@ public enum SystemPressureReader {
 
         let swap = swapUsage()
         let disk = diskTotals()
+        let cpu = cpuTicks()
 
         return PressureSample(
             timestampMs: timestampMs,
@@ -53,7 +59,10 @@ public enum SystemPressureReader {
             uptimeSeconds: ProcessInfo.processInfo.systemUptime,
             diskReadBytes: disk.read,
             diskWriteBytes: disk.written,
-            intervalSeconds: intervalSeconds
+            intervalSeconds: intervalSeconds,
+            samplerStartUptime: processStartUptime,
+            cpuTicksUsed: cpu.used,
+            cpuTicksIdle: cpu.idle
         )
     }
 
@@ -153,6 +162,30 @@ public enum SystemPressureReader {
         case .critical: return .critical
         @unknown default: return .nominal
         }
+    }
+
+    /// Cumulative CPU ticks across all cores, split into work and idle, from
+    /// `host_statistics(HOST_CPU_LOAD_INFO)`.
+    ///
+    /// Zeros when the call fails, which reads as "no CPU data" rather than as
+    /// an idle machine — the analysis requires the counters to advance before
+    /// it will report a utilisation at all.
+    static func cpuTicks() -> (used: Int64, idle: Int64) {
+        var info = host_cpu_load_info()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size
+        )
+        let status = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, rebound, &count)
+            }
+        }
+        guard status == KERN_SUCCESS else { return (0, 0) }
+        let user = Int64(info.cpu_ticks.0)
+        let system = Int64(info.cpu_ticks.1)
+        let idle = Int64(info.cpu_ticks.2)
+        let nice = Int64(info.cpu_ticks.3)
+        return (used: user + system + nice, idle: idle)
     }
 
     static func loadAverage1m() -> Double? {

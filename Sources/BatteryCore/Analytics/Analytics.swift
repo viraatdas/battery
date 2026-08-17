@@ -224,7 +224,41 @@ public struct Analytics: Sendable {
         try store.pressureSamples(from: window.start, to: window.end).last.map(MachineProfile.init)
     }
 
-    // MARK: - 6. Insights
+    // MARK: - 6. Activity timeline
+
+    /// The machine's workload across `window`, in fixed five-minute slices.
+    ///
+    /// Unlike `drainSeries`, which buckets to fit a chart and only measures
+    /// what the battery lost, this measures what the machine *did* — real CPU
+    /// utilisation from the kernel's tick counters, memory, and disk — so it
+    /// keeps working while plugged in, and every slice can be opened with
+    /// `breakdown(for:)`.
+    public func activityTimeline(
+        window: TimeWindow,
+        sliceSeconds: TimeInterval = ActivityTimeline.defaultSliceSeconds
+    ) throws -> [ActivitySlice] {
+        ActivityTimeline.build(
+            window: window,
+            pressure: try store.pressureSamples(from: window.start, to: window.end),
+            battery: try store.batterySamples(from: window.start, to: window.end),
+            stalls: try stalls(window: window),
+            sliceSeconds: sliceSeconds
+        )
+    }
+
+    /// What was running during one slice. Reads only that slice's rows, so
+    /// clicking a bar costs a small query rather than a re-analysis.
+    public func breakdown(for slice: ActivitySlice) throws -> ActivityBreakdown {
+        ActivityTimeline.breakdown(
+            slice: slice,
+            tracked: try store.trackedSamples(from: slice.start, to: slice.end),
+            processSamples: try store.processSamples(from: slice.start, to: slice.end),
+            machine: try store.pressureSamples(from: slice.start, to: slice.end)
+                .last.map(MachineProfile.init)
+        )
+    }
+
+    // MARK: - 7. Insights
 
     /// Ranked, plain-English findings for `window`, most severe first.
     ///
@@ -304,6 +338,12 @@ public struct Analytics: Sendable {
             diskBytesPerSecond: StallAnalyzer.diskBytesPerSecond(
                 pressure: pressure,
                 thresholds: options.stallThresholds
+            ),
+            activity: ActivityTimeline.build(
+                window: window,
+                pressure: pressure,
+                battery: try store.batterySamples(from: window.start, to: window.end),
+                stalls: stalls
             )
         )
     }
@@ -329,6 +369,8 @@ public struct AnalyticsReport: Sendable {
     public var diskBytesPerSecond: Double?
     /// The machine's memory and core count, for turning footprints into shares.
     public var machine: MachineProfile?
+    /// Five-minute activity slices across the window, each openable.
+    public var activity: [ActivitySlice]
 
     public init(
         window: TimeWindow,
@@ -341,7 +383,8 @@ public struct AnalyticsReport: Sendable {
         stalls: [StallEpisode] = [],
         pressure: PressureSample? = nil,
         machine: MachineProfile? = nil,
-        diskBytesPerSecond: Double? = nil
+        diskBytesPerSecond: Double? = nil,
+        activity: [ActivitySlice] = []
     ) {
         self.window = window
         self.series = series
@@ -354,5 +397,6 @@ public struct AnalyticsReport: Sendable {
         self.pressure = pressure
         self.machine = machine
         self.diskBytesPerSecond = diskBytesPerSecond
+        self.activity = activity
     }
 }

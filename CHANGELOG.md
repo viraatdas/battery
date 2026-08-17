@@ -54,8 +54,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   All migrate in place, and an app built against the new schema reads an older
   daemon's database without error — it simply has less to say.
 
+- An activity timeline: the day in five-minute slices, on one scale, over the
+  range the picker actually names — and every slice opens into what was running
+  during it, with agent sessions grouped. Replaces a chart that plotted battery
+  percentage and watts on one frame with two y-scales, mostly across hours it
+  had no data for.
+- CPU is now measured as real utilisation from `host_statistics(HOST_CPU_LOAD_INFO)`
+  tick counters rather than inferred from the load average, which is a queue
+  length and says nothing about work done. It also keeps working on AC, where
+  there is no battery discharge to measure at all.
+- `Scripts/install-agent.sh` and `uninstall-agent.sh`: a per-user install with no
+  root and no password, following the LaunchAgent + login-item pattern. The root
+  daemon is now optional and buys exactly one thing — per-app energy attribution.
+
 ### Fixed
 
+- A stopped sampler was reported as a stalled machine. Restarting, reinstalling,
+  or quitting the app leaves the same hole in the data that a wedged machine
+  does, and the clock test could not tell them apart — so every restart claimed
+  the Mac had been unresponsive. Each sample now records which sampler *run*
+  wrote it (schema v6).
+- `launchctl bootout` returns before the service is actually gone, so
+  re-installing raced and failed with a bare "Input/output error". The installer
+  waits for the old service to disappear.
+- The installer's readiness check counted every row in the database, so it
+  reported success from a previous install's data while the current one had
+  silently failed to start. It now counts only rows written after it began.
 - Process names are read from `argv[0]` rather than the kernel's `p_comm`, which
   reports the interpreter and truncates at 16 characters. Every coding agent
   shipped as a Node script was showing up as `node`, and so was invisible to the

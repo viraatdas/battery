@@ -40,22 +40,10 @@ struct DrainChartView: View {
             } else {
                 EmptyHint("No battery samples in \(choice.longTitle) yet.")
             }
-        } accessory: {
-            if isOffscreenRender {
-                SegmentedStandIn(options: WindowChoice.allCases.map(\.title), selected: choice.title)
-                    .frame(width: 176)
-            } else {
-                Picker("Window", selection: $choice) {
-                    ForEach(WindowChoice.allCases) { option in
-                        Text(option.title).tag(option)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 176)
-            }
         }
+        // The window picker lives on the activity chart above, which is the
+        // primary one now. Two segmented controls driving the same binding read
+        // as two independent settings.
     }
 
     // MARK: - Level

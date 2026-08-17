@@ -96,9 +96,30 @@ script reports as `node` there and would otherwise be invisible.
 macOS 14 or later. Swift toolchain (Xcode command line tools). No external
 dependencies — pure SwiftPM against the system SQLite and IOKit.
 
+## The chart
+
+The main panel is a timeline of the day in **five-minute slices** — how hard the
+machine was working at each point, on a single scale, over the range the picker
+names. **Click any slice** and it opens: what was running, which agent sessions
+were alive, how much memory and CPU each held. Slices where the machine stalled
+are red.
+
+CPU is real utilisation, differenced from the kernel's own tick counters, so it
+keeps working while plugged in. Power and energy come from the battery and are
+only shown where there *was* a discharge to measure — watts while on AC describe
+the charger, not the workload.
+
 ## Install
 
-Build and install the sampler (needs root, because `powermetrics` does):
+No root, no password. Installs a LaunchAgent in your own login session and adds
+the menu bar app as a login item:
+
+```sh
+./Scripts/install-agent.sh
+```
+
+That gives you everything except per-app *energy* attribution, which needs
+`powermetrics` and therefore root. To add it:
 
 ```sh
 sudo ./Scripts/install-daemon.sh
@@ -165,8 +186,12 @@ knowing about if you're chasing the last percent.
 ## Uninstall
 
 ```sh
-sudo ./Scripts/uninstall-daemon.sh
+./Scripts/uninstall-agent.sh              # the per-user agent
+sudo ./Scripts/uninstall-daemon.sh        # the root daemon, if installed
 ```
+
+Both keep the collected database, which is the only copy of your machine's
+history. Pass `--purge` to delete it.
 
 ## Troubleshooting
 
