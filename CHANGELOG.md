@@ -67,8 +67,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   root and no password, following the LaunchAgent + login-item pattern. The root
   daemon is now optional and buys exactly one thing — per-app energy attribution.
 
+- Terminal work is attributed to the **tab**, not the terminal. A tab is found
+  in the process tree — one `login` + `zsh` per tab — and labelled with the
+  folder it is sitting in, which is where the terminal gets its own title, so no
+  accessibility or screen-recording permission is involved. Everything spawned
+  inside a tab counts toward it, however deep.
+- One headline list, "using the most power", replacing the category breakdown,
+  top-offenders, agent-session, and drain-chart panels. Rows below a floor are
+  dropped: an idle Mac has a hundred processes ticking over at a thousandth of a
+  core, and ranking those produces a confident list of `distnoted` and
+  `suggestd` that means nothing.
+- Diagnosis panels now appear only when there is something to report.
+
+### Removed
+
+- `DrainChartView`, `CategoryBreakdownView`, `TopOffendersView`,
+  `ProcessSamplerMissingNotice`, and `ChartData`, all superseded by the single
+  power list and the activity timeline.
+
 ### Fixed
 
+- **Every CPU figure was about 42x too low.** `proc_taskinfo` reports CPU time
+  in mach absolute time units, not nanoseconds, and the two differ by the
+  platform timebase — 125/3 on Apple Silicon, 1/1 on Intel, which is why
+  assuming nanoseconds looks fine on one and is badly wrong on the other. A
+  three-core busy loop measured as 0.02 cores. Caught by running a known load
+  and not believing the output.
 - A stopped sampler was reported as a stalled machine. Restarting, reinstalling,
   or quitting the app leaves the same hole in the data that a wedged machine
   does, and the clock test could not tell them apart — so every restart claimed

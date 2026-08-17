@@ -88,8 +88,6 @@ final class AppModel: ObservableObject {
     @Published var choice: WindowChoice = .last6Hours {
         didSet { if oldValue != choice { refresh() } }
     }
-    @Published var metric: ChartData.Metric = .watts
-    @Published var activityMetric: ActivityMetric = .cpu
 
     /// Start of the activity slice the user has open, if any.
     @Published var selectedSlice: Date? {

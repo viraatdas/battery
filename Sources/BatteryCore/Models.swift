@@ -107,6 +107,9 @@ public struct ProcessSample: Codable, Sendable, Hashable {
     /// of a Mac feeling frozen and are invisible in both energy and memory.
     public var diskReadBytesPerS: Double?
     public var diskWriteBytesPerS: Double?
+    /// Working directory, recorded only for the shell that roots a terminal
+    /// tab. It is what names the tab, and what the terminal puts in its title.
+    public var workingDirectory: String?
     /// Resident set size in bytes — physical memory the process is holding.
     ///
     /// `nil` for the same reasons as `ppid`, plus one more: reading another
@@ -127,7 +130,8 @@ public struct ProcessSample: Codable, Sendable, Hashable {
         ppid: Int32? = nil,
         residentBytes: Int64? = nil,
         diskReadBytesPerS: Double? = nil,
-        diskWriteBytesPerS: Double? = nil
+        diskWriteBytesPerS: Double? = nil,
+        workingDirectory: String? = nil
     ) {
         self.timestampMs = timestampMs
         self.pid = pid
@@ -140,6 +144,7 @@ public struct ProcessSample: Codable, Sendable, Hashable {
         self.residentBytes = residentBytes
         self.diskReadBytesPerS = diskReadBytesPerS
         self.diskWriteBytesPerS = diskWriteBytesPerS
+        self.workingDirectory = workingDirectory
     }
 
     /// CPU cores' worth of work this sample represents: 1000 ms of CPU per

@@ -99,7 +99,6 @@ enum SelfTest {
         check("activity/day", ActivityChartView(
             slices: SelfTestFixtures.day,
             machine: SelfTestFixtures.machine,
-            metric: .constant(.cpu),
             selection: .constant(SelfTestFixtures.busiestSliceStart),
             choice: .constant(.last24Hours),
             window: SelfTestFixtures.dayWindow,
@@ -111,12 +110,6 @@ enum SelfTest {
             onDismiss: {}
         ))
 
-        check("agents/sessions", AgentSessionsView(
-            sessions: SelfTestFixtures.sessions,
-            machine: SelfTestFixtures.machine,
-            windowTitle: "the last 6 hours"
-        ))
-
         for choice in WindowChoice.allCases {
             let model = AppModel(startTimer: false)
             model.applyForTesting(AppModel.load(choice: choice, now: Date()))
@@ -126,8 +119,7 @@ enum SelfTest {
                 // cannot draw the contents of a scroll view.
                 check("popover/\(choice.rawValue)", PopoverContent(
                     snapshot: snapshot,
-                    choice: .constant(choice),
-                    metric: .constant(.watts)
+                    choice: .constant(choice)
                 ))
             case .onboarding(let reason):
                 print("skip popover/\(choice.rawValue) — onboarding (\(reason))")

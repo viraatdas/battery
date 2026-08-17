@@ -319,7 +319,7 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbPath, mode: .readWrite)
         // Reopening applies migrations idempotently and must not throw.
         _ = try SQLiteStore(path: dbPath, mode: .readWrite)
-        XCTAssertEqual(SQLiteStore.schemaVersion, 6)
+        XCTAssertEqual(SQLiteStore.schemaVersion, 7)
     }
 
     func testDefaultDBPathConstant() {

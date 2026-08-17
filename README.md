@@ -96,18 +96,31 @@ script reports as `node` there and would otherwise be invisible.
 macOS 14 or later. Swift toolchain (Xcode command line tools). No external
 dependencies — pure SwiftPM against the system SQLite and IOKit.
 
-## The chart
+## What you see
 
-The main panel is a timeline of the day in **five-minute slices** — how hard the
-machine was working at each point, on a single scale, over the range the picker
-names. **Click any slice** and it opens: what was running, which agent sessions
-were alive, how much memory and CPU each held. Slices where the machine stalled
-are red.
+One list: **what is using the most power**, in order.
 
-CPU is real utilisation, differenced from the kernel's own tick counters, so it
-keeps working while plugged in. Power and energy come from the battery and are
-only shown where there *was* a discharge to measure — watts while on AC describe
-the charger, not the workload.
+The thing that makes it useful is that terminal work is named by *tab*, not by
+terminal. "Ghostty — 41%" is useless with eight tabs open. This says:
+
+```
+battery      rudder-native      44%
+mwitch       claude             22%
+Arc                             14%
+```
+
+A tab is a real object in the process tree — the terminal spawns one `login` and
+`zsh` per tab — so it can be found without the accessibility API, without screen
+recording permission, and without asking the terminal anything. The label is the
+folder the tab is sitting in, which is also where the terminal gets the title it
+shows you. Everything spawned inside the tab, however deep, counts toward it.
+
+Below that, the day in **five-minute slices**. Click any one and it opens: what
+was running during those five minutes. Slices where the machine stalled are red.
+
+Diagnosis panels — pressure, stalls, insights — only appear when there is
+something wrong to report. A panel permanently saying "nothing is wrong" is
+clutter.
 
 ## Install
 

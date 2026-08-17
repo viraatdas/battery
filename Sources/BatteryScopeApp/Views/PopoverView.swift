@@ -26,8 +26,6 @@ struct PopoverView: View {
                 PopoverContent(
                     snapshot: snapshot,
                     choice: $model.choice,
-                    metric: $model.metric,
-                    activityMetric: $model.activityMetric,
                     selectedSlice: $model.selectedSlice,
                     breakdown: model.breakdown,
                     isLoadingBreakdown: model.isLoadingBreakdown
@@ -84,8 +82,6 @@ struct PopoverView: View {
 struct PopoverContent: View {
     var snapshot: Snapshot
     @Binding var choice: WindowChoice
-    @Binding var metric: ChartData.Metric
-    var activityMetric: Binding<ActivityMetric> = .constant(.cpu)
     var selectedSlice: Binding<Date?> = .constant(nil)
     var breakdown: ActivityBreakdown?
     var isLoadingBreakdown = false
@@ -96,18 +92,25 @@ struct PopoverContent: View {
 
             SectionDivider()
 
+            // The headline, and for most people the only thing they read: what
+            // is using power, named by terminal tab rather than by terminal.
+            EnergyListView(
+                ranking: snapshot.report.energyRanking,
+                windowTitle: choice.longTitle
+            )
+
+            SectionDivider()
+
+            // The day at a glance, with a click-through for any five minutes.
             ActivityChartView(
                 slices: snapshot.report.activity,
                 machine: snapshot.report.machine,
-                metric: activityMetric,
                 selection: selectedSlice,
                 choice: $choice,
                 window: snapshot.report.window,
                 windowTitle: choice.longTitle
             )
 
-            // Only once a bar is open: an empty detail panel under every chart
-            // is noise, and the chart's own footnote already says to click.
             if breakdown != nil || isLoadingBreakdown {
                 SectionDivider()
                 SliceBreakdownView(
@@ -117,70 +120,30 @@ struct PopoverContent: View {
                 )
             }
 
-            SectionDivider()
-
-            if !snapshot.hasEverRecordedProcessSamples {
-                ProcessSamplerMissingNotice()
+            // Everything below is diagnosis rather than the daily question, so
+            // it only appears when there is something wrong to report. A panel
+            // that is always on screen saying "nothing is wrong" is clutter.
+            if !snapshot.report.stalls.isEmpty {
                 SectionDivider()
+                SystemPressureView(
+                    pressure: snapshot.report.pressure,
+                    stalls: snapshot.report.stalls,
+                    windowTitle: choice.longTitle,
+                    diskBytesPerSecond: snapshot.report.diskBytesPerSecond
+                )
             }
 
-            // Pressure sits directly under the chart, above the battery
-            // attribution: when a Mac is stalling, that is the question being
-            // asked, and it should not be below three sections about watts.
-            SystemPressureView(
-                pressure: snapshot.report.pressure,
-                stalls: snapshot.report.stalls,
-                windowTitle: choice.longTitle,
-                diskBytesPerSecond: snapshot.report.diskBytesPerSecond
-            )
-
-            SectionDivider()
-
-            if !snapshot.report.agentSessions.isEmpty {
-                AgentSessionsView(
-                    sessions: snapshot.report.agentSessions,
-                    machine: snapshot.report.machine,
+            if !snapshot.report.insights.isEmpty {
+                SectionDivider()
+                InsightsView(
+                    insights: snapshot.report.insights,
                     windowTitle: choice.longTitle
                 )
-
-                SectionDivider()
             }
-
-            CategoryBreakdownView(
-                categories: snapshot.report.categories,
-                windowTitle: choice.longTitle,
-                hasEverRecordedProcessSamples: snapshot.hasEverRecordedProcessSamples
-            )
-
-            SectionDivider()
-
-            TopOffendersView(
-                processes: snapshot.report.processes,
-                windowTitle: choice.longTitle,
-                hasEverRecordedProcessSamples: snapshot.hasEverRecordedProcessSamples
-            )
-
-            SectionDivider()
-
-            InsightsView(
-                insights: snapshot.report.insights,
-                windowTitle: choice.longTitle
-            )
 
             SectionDivider()
 
             BatteryHealthView(health: snapshot.report.health)
-
-            SectionDivider()
-
-            // Battery level and drain rate over time. Kept below the activity
-            // chart because it answers the slower question — what happened to
-            // the charge — rather than "what is this machine doing right now".
-            DrainChartView(
-                series: snapshot.report.series,
-                metric: $metric,
-                choice: $choice
-            )
         }
         .padding(.bottom, Metrics.sectionSpacing)
     }

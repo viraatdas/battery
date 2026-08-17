@@ -12,7 +12,11 @@ import SwiftUI
 struct ActivityChartView: View {
     var slices: [ActivitySlice]
     var machine: MachineProfile?
-    @Binding var metric: ActivityMetric
+    /// Chosen from the data rather than offered as a control. Power is the
+    /// honest answer when the Mac was on battery; on AC there is no discharge
+    /// to measure and CPU is what remains. A picker here only asked the reader
+    /// to answer a question the data already settles.
+    var metric: ActivityMetric { slices.contains { $0.meanWatts != nil } ? .power : .cpu }
     @Binding var selection: Date?
     @Binding var choice: WindowChoice
     /// The range the picker currently names. The x-axis is pinned to this
@@ -36,10 +40,7 @@ struct ActivityChartView: View {
             if plotted.isEmpty {
                 EmptyHint(emptyMessage)
             } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    chart
-                    metricPicker
-                }
+                chart
             }
         } accessory: {
             windowPicker
@@ -152,24 +153,7 @@ struct ActivityChartView: View {
         return metric.color
     }
 
-    // MARK: - Metric picker
-
     @Environment(\.isOffscreenRender) private var isOffscreenRender
-
-    @ViewBuilder
-    private var metricPicker: some View {
-        if isOffscreenRender {
-            SegmentedStandIn(options: ActivityMetric.allCases.map(\.title), selected: metric.title)
-        } else {
-            Picker("Metric", selection: $metric) {
-                ForEach(ActivityMetric.allCases) { option in
-                    Text(option.title).tag(option)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-        }
-    }
 }
 
 /// What the activity chart plots.

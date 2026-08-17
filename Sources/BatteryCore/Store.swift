@@ -83,7 +83,10 @@ public final class SQLiteStore: @unchecked Sendable {
     /// sampler *run* wrote each row. Without it a sampler that was simply not
     /// running is indistinguishable from one the machine was too busy to
     /// schedule, and every restart reported as a stall.
-    public static let schemaVersion: Int32 = 6
+    ///
+    /// v7 adds `working_directory` to `tracked_samples`, which is what names a
+    /// terminal tab — "Ghostty is using 40%" is useless with eight tabs open.
+    public static let schemaVersion: Int32 = 7
 
     private let db: OpaquePointer
     private let lock = NSLock()
@@ -105,6 +108,8 @@ public final class SQLiteStore: @unchecked Sendable {
     private var hasPressureTable = false
     /// Whether the v5 `tracked_samples` table exists on disk.
     private var hasTrackedTable = false
+    /// Whether `tracked_samples` has the v7 `working_directory` column.
+    private var hasWorkingDirectoryColumn = false
     /// Whether `pressure_samples` has the v5 uptime/disk/interval columns.
     private var hasPressureDetailColumns = false
     /// Whether `pressure_samples` has the v6 `sampler_start_uptime` column.
@@ -176,7 +181,9 @@ public final class SQLiteStore: @unchecked Sendable {
             hasProcessAncestryColumns =
                 processColumns.contains("ppid") && processColumns.contains("resident_bytes")
             hasPressureTable = try !columnNames(of: "pressure_samples").isEmpty
-            hasTrackedTable = try !columnNames(of: "tracked_samples").isEmpty
+            let trackedColumns = try columnNames(of: "tracked_samples")
+            hasTrackedTable = !trackedColumns.isEmpty
+            hasWorkingDirectoryColumn = trackedColumns.contains("working_directory")
             let pressureColumns = try columnNames(of: "pressure_samples")
             hasPressureDetailColumns = pressureColumns
                 .isSuperset(of: ["uptime_seconds", "disk_read_bytes", "disk_write_bytes", "interval_seconds"])
@@ -345,6 +352,11 @@ public final class SQLiteStore: @unchecked Sendable {
                     try addColumnIfMissing(table: "pressure_samples", column: column, type: "REAL")
                 }
             }
+            if version < 7 {
+                try addColumnIfMissing(
+                    table: "tracked_samples", column: "working_directory", type: "TEXT"
+                )
+            }
             try exec("PRAGMA user_version = \(Self.schemaVersion)")
             try exec("COMMIT")
         } catch {
@@ -505,11 +517,13 @@ public final class SQLiteStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        let directoryColumn = hasWorkingDirectoryColumn ? ", working_directory" : ""
+        let directoryPlaceholder = hasWorkingDirectoryColumn ? ", ?" : ""
         let sql = """
             INSERT INTO tracked_samples
                 (timestamp_ms, pid, ppid, name, category, resident_bytes, cpu_ms_per_s,
-                 disk_read_bps, disk_write_bps)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 disk_read_bps, disk_write_bps\(directoryColumn))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?\(directoryPlaceholder))
             """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -528,6 +542,13 @@ public final class SQLiteStore: @unchecked Sendable {
                 sqlite3_bind_double(statement, 7, sample.cpuMsPerS)
                 bind(statement, 8, sample.diskReadBytesPerS)
                 bind(statement, 9, sample.diskWriteBytesPerS)
+                if hasWorkingDirectoryColumn {
+                    if let directory = sample.workingDirectory {
+                        sqlite3_bind_text(statement, 10, directory, -1, Self.transientDestructor)
+                    } else {
+                        sqlite3_bind_null(statement, 10)
+                    }
+                }
 
                 guard sqlite3_step(statement) == SQLITE_DONE else {
                     throw SQLiteStoreError.stepFailed(sql: sql, message: errorMessage())
@@ -547,9 +568,10 @@ public final class SQLiteStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        let directoryColumn = hasWorkingDirectoryColumn ? ", working_directory" : ""
         let sql = """
             SELECT timestamp_ms, pid, ppid, name, category, resident_bytes, cpu_ms_per_s,
-                   disk_read_bps, disk_write_bps
+                   disk_read_bps, disk_write_bps\(directoryColumn)
             FROM tracked_samples
             WHERE timestamp_ms >= ? AND timestamp_ms <= ?
             ORDER BY timestamp_ms ASC, pid ASC
@@ -581,7 +603,9 @@ public final class SQLiteStore: @unchecked Sendable {
                 diskReadBytesPerS: sqlite3_column_type(statement, 7) == SQLITE_NULL
                     ? nil : sqlite3_column_double(statement, 7),
                 diskWriteBytesPerS: sqlite3_column_type(statement, 8) == SQLITE_NULL
-                    ? nil : sqlite3_column_double(statement, 8)
+                    ? nil : sqlite3_column_double(statement, 8),
+                workingDirectory: hasWorkingDirectoryColumn
+                    ? sqlite3_column_text(statement, 9).map { String(cString: $0) } : nil
             ))
         }
         return results

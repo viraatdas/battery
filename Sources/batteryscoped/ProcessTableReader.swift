@@ -29,6 +29,14 @@ public enum ProcessTableReader {
         /// run sees only its own processes.
         public var residentBytes: Int64?
         /// Cumulative CPU time since the process started, in nanoseconds.
+        ///
+        /// Converted on read: `proc_taskinfo` reports these in *mach absolute
+        /// time units*, not nanoseconds, and the two differ by the platform's
+        /// timebase — 125/3 on Apple Silicon. Treating the raw value as
+        /// nanoseconds under-reports every CPU figure by a factor of about 42,
+        /// which is what a three-core busy loop reading as 0.02 cores turned
+        /// out to be.
+        ///
         /// Meaningless alone — the sampler differences it against the previous
         /// tick to get a rate. `nil` when task info could not be read.
         public var cpuNanoseconds: UInt64?
@@ -36,6 +44,30 @@ public enum ProcessTableReader {
         /// Differenced the same way. `nil` when resource usage is unreadable.
         public var diskReadBytes: UInt64?
         public var diskWriteBytes: UInt64?
+        /// Current working directory, read only for the shell at the root of a
+        /// terminal tab. It is what names the tab — a shell sitting in
+        /// `~/code/battery` is the "battery" tab, which is also what the
+        /// terminal itself puts in the title.
+        public var workingDirectory: String?
+    }
+
+    /// Working directory of one pid, or `nil` when it cannot be read.
+    ///
+    /// Deliberately not read for every process: it is a syscall each, the
+    /// process table runs to several hundred, and the only ones whose directory
+    /// means anything are the shells that root a terminal tab.
+    static func workingDirectory(ofPid pid: Int32) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        let written = withUnsafeMutablePointer(to: &info) { pointer in
+            proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, pointer, size)
+        }
+        guard written == size else { return nil }
+        return withUnsafeBytes(of: info.pvi_cdir.vip_path) { raw in
+            let bytes = raw.prefix { $0 != 0 }
+            let path = String(decoding: bytes, as: UTF8.self)
+            return path.isEmpty ? nil : path
+        }
     }
 
     /// Snapshot of every process the caller can see, keyed by pid.
@@ -63,7 +95,7 @@ public enum ProcessTableReader {
                 ppid: process.kp_eproc.e_ppid,
                 name: name(of: process, buffer: &argumentBuffer),
                 residentBytes: task.map { Int64(bitPattern: $0.pti_resident_size) },
-                cpuNanoseconds: task.map { $0.pti_total_user + $0.pti_total_system },
+                cpuNanoseconds: task.map { machToNanoseconds($0.pti_total_user + $0.pti_total_system) },
                 diskReadBytes: usage?.ri_diskio_bytesread,
                 diskWriteBytes: usage?.ri_diskio_byteswritten
             )
@@ -86,6 +118,23 @@ public enum ProcessTableReader {
             return argv0
         }
         return commandName(of: process)
+    }
+
+    /// The platform's mach-time to nanosecond ratio, read once.
+    ///
+    /// 1/1 on Intel, 125/3 on Apple Silicon — which is why assuming
+    /// nanoseconds happens to work on one and is badly wrong on the other.
+    private static let timebase: mach_timebase_info_data_t = {
+        var info = mach_timebase_info_data_t()
+        guard mach_timebase_info(&info) == KERN_SUCCESS, info.denom != 0 else {
+            return mach_timebase_info_data_t(numer: 1, denom: 1)
+        }
+        return info
+    }()
+
+    static func machToNanoseconds(_ ticks: UInt64) -> UInt64 {
+        guard timebase.numer != timebase.denom else { return ticks }
+        return ticks * UInt64(timebase.numer) / UInt64(timebase.denom)
     }
 
     /// `p_comm` decoded from its fixed-size C character tuple.
@@ -272,13 +321,19 @@ public enum ProcessTableReader {
             }
         )
 
+        // Terminal tabs, whole, including the `login`/`zsh` plumbing. Those
+        // processes cost nothing and would never survive a top-N cut, but
+        // without them the chain from the terminal down to the command is
+        // broken and a tab cannot be identified at all.
+        keep.formUnion(terminalTreePids(in: snapshot))
+
         // The heaviest processes on each axis, whether or not anyone asked
         // about them. A process at rest on every axis is not worth a row.
         keep.formUnion(topPids(candidates) { Double($0.residentBytes ?? 0) })
         keep.formUnion(topPids(candidates) { $0.cpuMsPerS })
         keep.formUnion(topPids(candidates) { $0.diskBytesPerS ?? 0 })
 
-        return candidates.filter { keep.contains($0.pid) }
+        return attachWorkingDirectories(to: candidates.filter { keep.contains($0.pid) })
     }
 
     /// The `topProcessesPerResource` pids with the largest nonzero `measure`.
@@ -349,6 +404,59 @@ public enum ProcessTableReader {
         nowMs: Int64
     ) -> Double {
         rates(for: entry, previous: previous, nowMs: nowMs).cpuMsPerS
+    }
+
+    /// Every pid belonging to a terminal emulator's tree, terminals included.
+    static func terminalTreePids(in snapshot: [Int32: Entry]) -> [Int32] {
+        let terminals = snapshot.values
+            .filter { TerminalTabs.isTerminal(name: $0.name) }
+            .map(\.pid)
+        guard !terminals.isEmpty else { return [] }
+        let roots = Set(terminals)
+        return terminals + snapshot.values.compactMap { entry -> Int32? in
+            var current = entry
+            var depth = 0
+            var seen: Set<Int32> = [entry.pid]
+            while depth < maxAncestorDepth {
+                guard current.ppid > 0,
+                      !seen.contains(current.ppid),
+                      let parent = snapshot[current.ppid] else { return nil }
+                if roots.contains(parent.pid) { return entry.pid }
+                seen.insert(current.ppid)
+                current = parent
+                depth += 1
+            }
+            return nil
+        }
+    }
+
+    /// Fills in the working directory for the shells that root a terminal tab.
+    ///
+    /// Only those: a directory read is a syscall each and means nothing for the
+    /// other several hundred processes.
+    static func attachWorkingDirectories(to samples: [ProcessSample]) -> [ProcessSample] {
+        let tabs = TerminalTabs.tabs(inTick: samples)
+        guard !tabs.isEmpty else { return samples }
+
+        // The shell nearest the terminal is the one whose directory the tab
+        // title follows, so every member of the tab is offered the read and the
+        // first that answers wins — a tab at a bare prompt has only the shell.
+        var directories: [Int32: String] = [:]
+        for tab in tabs {
+            for pid in tab.pids.sorted() {
+                if let directory = workingDirectory(ofPid: pid) {
+                    directories[pid] = directory
+                }
+            }
+        }
+        guard !directories.isEmpty else { return samples }
+
+        return samples.map { sample in
+            guard let directory = directories[sample.pid] else { return sample }
+            var updated = sample
+            updated.workingDirectory = directory
+            return updated
+        }
     }
 
     /// Every pid whose ancestor chain reaches `root`, plus `root` itself.

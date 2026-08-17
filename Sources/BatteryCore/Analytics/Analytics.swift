@@ -224,6 +224,21 @@ public struct Analytics: Sendable {
         try store.pressureSamples(from: window.start, to: window.end).last.map(MachineProfile.init)
     }
 
+    /// The last few minutes of tracked rows, which is the span the headline
+    /// ranking is about. Falls back to the whole window when the window is
+    /// shorter than that.
+    private func recentSamples(
+        tracked: [ProcessSample],
+        processSamples: [ProcessSample]?,
+        window: TimeWindow,
+        lookbackSeconds: TimeInterval = 600
+    ) -> [ProcessSample] {
+        guard let newest = tracked.map(\.timestampMs).max() else { return [] }
+        let cutoff = newest - Int64(lookbackSeconds * 1000)
+        let recent = tracked.filter { $0.timestampMs >= cutoff }
+        return recent.isEmpty ? tracked : recent
+    }
+
     // MARK: - 6. Activity timeline
 
     /// The machine's workload across `window`, in fixed five-minute slices.
@@ -344,6 +359,12 @@ public struct Analytics: Sendable {
                 pressure: pressure,
                 battery: try store.batterySamples(from: window.start, to: window.end),
                 stalls: stalls
+            ),
+            // Ranked over the most recent few minutes rather than the whole
+            // window: "what is eating my battery" is a question about now, and
+            // a day-long average buries a process that started ten minutes ago.
+            energyRanking: EnergyRanking.rank(
+                samples: recentSamples(tracked: tracked, processSamples: nil, window: window)
             )
         )
     }
@@ -371,6 +392,9 @@ public struct AnalyticsReport: Sendable {
     public var machine: MachineProfile?
     /// Five-minute activity slices across the window, each openable.
     public var activity: [ActivitySlice]
+    /// The headline list: what is eating the most power, terminal work named by
+    /// tab rather than lumped under the terminal.
+    public var energyRanking: EnergyRanking.Result
 
     public init(
         window: TimeWindow,
@@ -384,7 +408,8 @@ public struct AnalyticsReport: Sendable {
         pressure: PressureSample? = nil,
         machine: MachineProfile? = nil,
         diskBytesPerSecond: Double? = nil,
-        activity: [ActivitySlice] = []
+        activity: [ActivitySlice] = [],
+        energyRanking: EnergyRanking.Result = .init(basis: .cpu, rows: [])
     ) {
         self.window = window
         self.series = series
@@ -398,5 +423,6 @@ public struct AnalyticsReport: Sendable {
         self.machine = machine
         self.diskBytesPerSecond = diskBytesPerSecond
         self.activity = activity
+        self.energyRanking = energyRanking
     }
 }
