@@ -72,6 +72,26 @@ if compgen -G "${DATA_DIR}/batteryscope.db*" > /dev/null; then
     chmod 644 "${DATA_DIR}"/batteryscope.db*
 fi
 
+# The app reads the system database in preference to the per-user one, so the
+# moment this daemon creates one, whatever the unprivileged agent has already
+# collected stops being visible. Carry it over rather than appearing to lose it.
+# `.backup` rather than `cp`, because a WAL database is three files and copying
+# only the first yields a stale or corrupt result.
+USER_HOME="$(eval echo "~${SUDO_USER:-root}")"
+USER_DB="${USER_HOME}/Library/Application Support/BatteryScope/batteryscope.db"
+if [ ! -f "${DATA_DIR}/batteryscope.db" ] && [ -f "${USER_DB}" ]; then
+    echo "==> Seeding the system database from ${USER_DB}"
+    if sqlite3 "${USER_DB}" ".backup '${DATA_DIR}/batteryscope.db'" 2>/dev/null; then
+        chown root:wheel "${DATA_DIR}/batteryscope.db"
+        chmod 644 "${DATA_DIR}/batteryscope.db"
+        echo "    carried over $(sqlite3 "${DATA_DIR}/batteryscope.db" \
+            'select count(*) from pressure_samples;' 2>/dev/null || echo '?') pressure samples"
+    else
+        echo "    warning: could not copy it; starting fresh" >&2
+        rm -f "${DATA_DIR}/batteryscope.db"
+    fi
+fi
+
 echo "==> Creating ${LOG_DIR}"
 install -d -m 755 -o root -g wheel "${LOG_DIR}"
 
@@ -111,6 +131,21 @@ if [ "${UP}" -ne 1 ]; then
     echo "---- tail ${LOG_DIR}/daemon.log ----" >&2
     tail -n 40 "${LOG_DIR}/daemon.log" >&2 2>/dev/null || echo "(no log yet)" >&2
     exit 1
+fi
+
+# Two samplers writing two databases is pointless work: this one runs as root,
+# so it reads every process — including the root-owned ones the user agent is
+# structurally denied — and it alone can run powermetrics. The menu bar agent
+# stays; only the redundant sampler is retired.
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+    USER_UID="$(id -u "${SUDO_USER}")"
+    if launchctl print "gui/${USER_UID}/com.batteryscope.sampler" > /dev/null 2>&1; then
+        echo "==> Retiring the unprivileged sampler (this daemon supersedes it)"
+        launchctl bootout "gui/${USER_UID}/com.batteryscope.sampler" 2>/dev/null || true
+        sudo -u "${SUDO_USER}" launchctl disable "gui/${USER_UID}/com.batteryscope.sampler" 2>/dev/null || true
+        rm -f "${USER_HOME}/Library/LaunchAgents/com.batteryscope.sampler.plist"
+        echo "    the menu bar app keeps running; only the duplicate sampler is gone"
+    fi
 fi
 
 echo "==> Done. BatteryScope is sampling."
