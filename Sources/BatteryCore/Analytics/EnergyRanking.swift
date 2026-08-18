@@ -148,14 +148,13 @@ public enum EnergyRanking {
         // a dimensionless score with no such ceiling, so an energy ranking
         // stays a share of what was attributed — but it is a *complete*
         // attribution, which is why that is honest there and was not here.
+        // Left over from when the remainder was one row; it is two now, each
+        // computing its own share, so this served nothing.
         let total: Double
-        let unattributed: Double
         if basis == .cpu, let machineCores, machineCores > 0 {
             total = max(machineCores, attributed)
-            unattributed = max(0, machineCores - attributed)
         } else {
             total = attributed
-            unattributed = 0
         }
 
         var ranked = rows
