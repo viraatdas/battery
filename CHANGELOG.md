@@ -4,7 +4,9 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## Unreleased
+## 1.0.0 — 2026-08-17
+
+First release.
 
 ### Added
 
@@ -127,11 +129,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   hundred into. It trapped on the first call; the struct is now allocated by the
   caller, which is what the C API actually asks for.
 
-## 1.0.0 — 2026-08-16
-
-Initial release.
-
-### Added
+### Also in this release — the original sampler and menu bar app
 
 - `batteryscoped`, a root LaunchDaemon sampler joining `powermetrics` per-process
   energy impact with IOKit/AppleSmartBattery watts, cycle count, capacity, and

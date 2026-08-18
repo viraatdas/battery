@@ -10,3 +10,6 @@ dist/
 RUDDER.md
 RUDDER_SHARED.md
 .claude/skills/rudder-*/
+
+# Vercel CLI link for the site deploy
+site/.vercel/

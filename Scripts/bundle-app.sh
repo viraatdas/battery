@@ -98,9 +98,18 @@ plutil -lint "$APP/Contents/Info.plist" > /dev/null
 echo "    Info.plist valid (LSUIElement=true, menu bar only)"
 
 echo "==> Ad-hoc signing"
-codesign --force --sign - --timestamp=none "$APP"
+# Ad-hoc by default, which is right for a local build and needs no keychain.
+# Set SIGN_IDENTITY to a Developer ID to produce something notarizable: that
+# additionally needs the hardened runtime and a secure timestamp, both of which
+# notarization rejects the binary without.
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+if [ "$SIGN_IDENTITY" = "-" ]; then
+	codesign --force --sign - --timestamp=none "$APP"
+else
+	codesign --force --sign "$SIGN_IDENTITY" --options runtime --timestamp "$APP"
+fi
 codesign --verify --deep --strict "$APP"
-echo "    signed"
+echo "    signed ($SIGN_IDENTITY)"
 
 echo "==> Done: $APP"
 echo "    open $APP    # or double-click it in Finder"

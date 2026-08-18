@@ -1,5 +1,7 @@
 # BatteryScope
 
+**[battery.viraat.dev](https://battery.viraat.dev)** &nbsp;·&nbsp; [**Download for macOS**](https://github.com/viraatdas/battery/releases/latest) — signed and notarized
+
 Find out where your Mac's battery — and its responsiveness — actually goes.
 
 macOS tells you a percentage and a vague list of "apps using significant energy."
@@ -129,8 +131,13 @@ clutter.
 
 ## Install
 
-No root, no password. Installs a LaunchAgent in your own login session and adds
-the menu bar app as a login item:
+Download the [notarized DMG](https://github.com/viraatdas/battery/releases/latest),
+drag BatteryScope to Applications, and open it. It lives in the menu bar — no
+Dock icon.
+
+To keep it sampling in the background and start at login — no root, no password.
+Installs a LaunchAgent in your own login session and adds the menu bar app as a
+login item:
 
 ```sh
 ./Scripts/install-agent.sh
