@@ -207,6 +207,31 @@ final class ActivityTimelineTests: XCTestCase {
         XCTAssertTrue(slices.contains { $0.stallSeverity == nil }, "and not on every slice")
     }
 
+    func testMachineCoresIsTimeWeightedAndSkipsBadPairs() {
+        // 20% of 10 cores across every pair.
+        var samples: [PressureSample] = []
+        for tick in 0...60 {
+            samples.append(pressure(
+                offsetSeconds: Int64(tick * 5),
+                cpuTicksUsed: Int64(tick) * 20,
+                cpuTicksIdle: Int64(tick) * 80
+            ))
+        }
+        XCTAssertEqual(EnergyRanking.machineCores(pressure: samples) ?? 0, 2, accuracy: 0.01)
+
+        // A pair spanning a sampler restart is not a measurement.
+        let split = [
+            pressure(offsetSeconds: 0, cpuTicksUsed: 1_000, cpuTicksIdle: 1_000, samplerStart: 100),
+            pressure(offsetSeconds: 5, cpuTicksUsed: 900_000, cpuTicksIdle: 1_000, samplerStart: 900),
+        ]
+        XCTAssertNil(EnergyRanking.machineCores(pressure: split))
+    }
+
+    func testMachineCoresNeedsTwoSamples() {
+        XCTAssertNil(EnergyRanking.machineCores(pressure: []))
+        XCTAssertNil(EnergyRanking.machineCores(pressure: [pressure(offsetSeconds: 0)]))
+    }
+
     // MARK: - Breakdown
 
     private func slice(offsetSeconds: TimeInterval = 0) -> ActivitySlice {

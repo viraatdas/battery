@@ -86,7 +86,12 @@ public final class SQLiteStore: @unchecked Sendable {
     ///
     /// v7 adds `working_directory` to `tracked_samples`, which is what names a
     /// terminal tab — "Ghostty is using 40%" is useless with eight tabs open.
-    public static let schemaVersion: Int32 = 7
+    ///
+    /// v8 adds `tick_totals`: the summed CPU of every process at each tick,
+    /// which is what tells "processes the list left out" apart from "CPU no
+    /// per-process tool can attribute at all". Half a busy machine is the
+    /// latter, and without this the two are indistinguishable.
+    public static let schemaVersion: Int32 = 8
 
     private let db: OpaquePointer
     private let lock = NSLock()
@@ -110,6 +115,8 @@ public final class SQLiteStore: @unchecked Sendable {
     private var hasTrackedTable = false
     /// Whether `tracked_samples` has the v7 `working_directory` column.
     private var hasWorkingDirectoryColumn = false
+    /// Whether the v8 `tick_totals` table exists on disk.
+    private var hasTickTotalsTable = false
     /// Whether `pressure_samples` has the v5 uptime/disk/interval columns.
     private var hasPressureDetailColumns = false
     /// Whether `pressure_samples` has the v6 `sampler_start_uptime` column.
@@ -184,6 +191,7 @@ public final class SQLiteStore: @unchecked Sendable {
             let trackedColumns = try columnNames(of: "tracked_samples")
             hasTrackedTable = !trackedColumns.isEmpty
             hasWorkingDirectoryColumn = trackedColumns.contains("working_directory")
+            hasTickTotalsTable = try !columnNames(of: "tick_totals").isEmpty
             let pressureColumns = try columnNames(of: "pressure_samples")
             hasPressureDetailColumns = pressureColumns
                 .isSuperset(of: ["uptime_seconds", "disk_read_bytes", "disk_write_bytes", "interval_seconds"])
@@ -356,6 +364,14 @@ public final class SQLiteStore: @unchecked Sendable {
                 try addColumnIfMissing(
                     table: "tracked_samples", column: "working_directory", type: "TEXT"
                 )
+            }
+            if version < 8 {
+                try exec("""
+                    CREATE TABLE IF NOT EXISTS tick_totals (
+                        timestamp_ms  INTEGER PRIMARY KEY,
+                        process_cores REAL NOT NULL
+                    )
+                    """)
             }
             try exec("PRAGMA user_version = \(Self.schemaVersion)")
             try exec("COMMIT")
@@ -561,6 +577,38 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    /// Records the summed CPU of every process at one tick.
+    public func insert(tickTotalProcessCores cores: Double, timestampMs: Int64) throws {
+        guard hasTickTotalsTable else { return }
+        lock.lock()
+        defer { lock.unlock() }
+
+        let sql = "INSERT OR REPLACE INTO tick_totals (timestamp_ms, process_cores) VALUES (?, ?)"
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, timestampMs)
+        sqlite3_bind_double(statement, 2, cores)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw SQLiteStoreError.stepFailed(sql: sql, message: errorMessage())
+        }
+    }
+
+    /// Mean summed process CPU over `[from, to]`, or `nil` when unrecorded.
+    public func meanProcessCores(from: Date, to: Date) throws -> Double? {
+        guard hasTickTotalsTable else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+
+        let sql = "SELECT avg(process_cores) FROM tick_totals WHERE timestamp_ms >= ? AND timestamp_ms <= ?"
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, Self.millis(from))
+        sqlite3_bind_int64(statement, 2, Self.millis(to))
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        guard sqlite3_column_type(statement, 0) != SQLITE_NULL else { return nil }
+        return sqlite3_column_double(statement, 0)
+    }
+
     /// Tracked-process samples in `[from, to]`, ascending. Empty against a
     /// database with no `tracked_samples` table.
     public func trackedSamples(from: Date, to: Date) throws -> [ProcessSample] {
@@ -690,6 +738,7 @@ public final class SQLiteStore: @unchecked Sendable {
         var tables = ["battery_samples", "process_samples"]
         if hasPressureTable { tables.append("pressure_samples") }
         if hasTrackedTable { tables.append("tracked_samples") }
+        if hasTickTotalsTable { tables.append("tick_totals") }
         for table in tables {
             let sql = "DELETE FROM \(table) WHERE timestamp_ms < ?"
             let statement = try prepare(sql)

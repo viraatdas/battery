@@ -78,14 +78,18 @@ public final class Sampler {
         }
         guard !snapshot.isEmpty else { return }
         do {
-            let samples = ProcessTableReader.trackedSamples(
+            let tick = ProcessTableReader.tick(
                 timestampMs: timestampMs,
                 snapshot: snapshot,
                 previous: previousProcessTable
             )
-            guard !samples.isEmpty else { return }
-            try store.insert(trackedSamples: samples)
-            log.debug("wrote \(samples.count) tracked samples")
+            // Recorded even when nothing was worth keeping: "every process
+            // together used almost nothing" is itself the answer some of the
+            // time, and it is the denominator either way.
+            try store.insert(tickTotalProcessCores: tick.processCores, timestampMs: timestampMs)
+            guard !tick.samples.isEmpty else { return }
+            try store.insert(trackedSamples: tick.samples)
+            log.debug("wrote \(tick.samples.count) tracked samples")
         } catch {
             log.error("tracked sample failed: \(String(describing: error), privacy: .public)")
         }

@@ -244,15 +244,120 @@ final class TerminalTabTests: XCTestCase {
         XCTAssertEqual(ranking.rows.first?.label, "battery")
     }
 
-    func testSharesAreRelativeToWhatIsListed() {
+    func testSharesAreAgainstTheMachineNotTheList() {
+        // The bug this fixes: attribution covered 0.6 cores of a machine using
+        // 3, so a row reading 75% meant 75% of a fifth of the truth.
         let samples = [ghostty]
             + tab(loginPid: 1161, shellPid: 1162, directory: "/Users/viraat/code/battery",
                   command: (name: "claude", pid: 1329, cores: 3))
             + [sample("Safari", pid: 300, ppid: 1, cores: 1)]
 
-        let ranking = EnergyRanking.rank(samples: samples)
+        let ranking = EnergyRanking.rank(samples: samples, machineCores: 8)
+
+        XCTAssertEqual(ranking.machineCores, 8)
+        let tabRow = ranking.rows.first { $0.kind == .terminalTab }
+        XCTAssertEqual(tabRow?.sharePct ?? 0, 37.5, accuracy: 0.5, "3 of 8 cores, not 3 of 4")
+        let safari = ranking.rows.first { $0.label == "Safari" }
+        XCTAssertEqual(safari?.sharePct ?? 0, 12.5, accuracy: 0.5)
+    }
+
+    func testUnlistedProcessesAndUnreadableCPUAreSeparateRows() {
+        // The distinction that matters: "this list left it out" is a gap in
+        // the tool, the rest is CPU an unprivileged sampler is not permitted
+        // to attribute — kernel time plus every root-owned process, which
+        // macOS denies to anything that is not setuid root.
+        let samples = [ghostty]
+            + tab(loginPid: 1161, shellPid: 1162, directory: "/Users/viraat/code/battery",
+                  command: (name: "claude", pid: 1329, cores: 2))
+
+        let ranking = EnergyRanking.rank(samples: samples, machineCores: 8, processCores: 5)
+
+        let others = ranking.rows.first { $0.id == "other-processes" }
+        let system = ranking.rows.first { $0.id == "system" }
+        XCTAssertEqual(others?.sharePct ?? 0, 37.5, accuracy: 0.5, "5 measured − 2 listed, of 8")
+        XCTAssertEqual(system?.sharePct ?? 0, 37.5, accuracy: 0.5, "8 machine − 5 readable, of 8")
+        XCTAssertEqual(system?.label, "System & root processes")
+        XCTAssertEqual(
+            ranking.rows.compactMap(\.sharePct).reduce(0, +), 100, accuracy: 0.5,
+            "and the three together are the whole machine"
+        )
+    }
+
+    func testTheColumnNeverExceedsTheMachine() {
+        // Rounding or a stale denominator must not produce shares over 100%.
+        let samples = [ghostty]
+            + tab(loginPid: 1161, shellPid: 1162, directory: "/Users/viraat/code/battery",
+                  command: (name: "claude", pid: 1329, cores: 9))
+        // Listed work exceeds the machine figure: a plausible skew when the two
+        // are measured over slightly different spans.
+        let ranking = EnergyRanking.rank(samples: samples, machineCores: 4, processCores: 4)
         let total = ranking.rows.compactMap(\.sharePct).reduce(0, +)
-        XCTAssertEqual(total, 100, accuracy: 0.5)
-        XCTAssertEqual(ranking.rows.first?.sharePct ?? 0, 75, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(total, 100.5)
+    }
+
+    func testNoSystemRowWhenProcessesAccountForTheMachine() {
+        let samples = [ghostty]
+            + tab(loginPid: 1161, shellPid: 1162, directory: "/Users/viraat/code/battery",
+                  command: (name: "claude", pid: 1329, cores: 2))
+        let ranking = EnergyRanking.rank(samples: samples, machineCores: 4, processCores: 4)
+        XCTAssertNil(ranking.rows.first { $0.id == "system" })
+        XCTAssertEqual(ranking.rows.first { $0.id == "other-processes" }?.sharePct ?? 0, 50, accuracy: 0.5)
+    }
+
+    func testUntrackedCPUIsShownRatherThanSilentlyDropped() {
+        // A machine at 8 cores with 4 attributed: the other half is real and
+        // was previously invisible, which is what made the listed rows look
+        // like the whole story.
+        let samples = [ghostty]
+            + tab(loginPid: 1161, shellPid: 1162, directory: "/Users/viraat/code/battery",
+                  command: (name: "claude", pid: 1329, cores: 3))
+            + [sample("Safari", pid: 300, ppid: 1, cores: 1)]
+
+        let ranking = EnergyRanking.rank(samples: samples, machineCores: 8)
+        let remainder = ranking.rows.first { $0.kind == .remainder }
+
+        XCTAssertNotNil(remainder, "the unattributed half must be named")
+        XCTAssertEqual(remainder?.sharePct ?? 0, 50, accuracy: 0.5)
+        XCTAssertEqual(
+            ranking.rows.compactMap(\.sharePct).reduce(0, +), 100, accuracy: 0.5,
+            "and the column adds to the machine"
+        )
+    }
+
+    func testNoRemainderRowWhenAttributionIsEssentiallyComplete() {
+        let samples = [ghostty]
+            + tab(loginPid: 1161, shellPid: 1162, directory: "/Users/viraat/code/battery",
+                  command: (name: "claude", pid: 1329, cores: 4))
+        let ranking = EnergyRanking.rank(samples: samples, machineCores: 4)
+        XCTAssertNil(ranking.rows.first { $0.kind == .remainder })
+    }
+
+    func testWithoutAMachineTotalSharesStayRelativeToTheList() {
+        // No pressure data: there is no honest machine denominator, so the
+        // shares say what they can and no remainder is invented.
+        let samples = [ghostty]
+            + tab(loginPid: 1161, shellPid: 1162, directory: "/Users/viraat/code/battery",
+                  command: (name: "claude", pid: 1329, cores: 3))
+            + [sample("Safari", pid: 300, ppid: 1, cores: 1)]
+
+        let ranking = EnergyRanking.rank(samples: samples, machineCores: nil)
+        XCTAssertNil(ranking.machineCores)
+        XCTAssertNil(ranking.rows.first { $0.kind == .remainder })
+        XCTAssertEqual(ranking.rows.compactMap(\.sharePct).reduce(0, +), 100, accuracy: 0.5)
+    }
+
+    func testEnergyBasisIsNotDilutedByACPUDenominator() {
+        // powermetrics attributes every process, so its shares are already
+        // complete; measuring them against a core count would be a category
+        // error, not a correction.
+        let samples = [ghostty]
+            + tab(loginPid: 1161, shellPid: 1162, directory: "/Users/viraat/code/battery",
+                  command: (name: "claude", pid: 1329, cores: 1))
+            + [sample("Safari", pid: 300, ppid: 1, cores: 0.1, energy: 300)]
+
+        let ranking = EnergyRanking.rank(samples: samples, machineCores: 8)
+        XCTAssertEqual(ranking.basis, .energy)
+        XCTAssertNil(ranking.rows.first { $0.kind == .remainder })
+        XCTAssertEqual(ranking.rows.compactMap(\.sharePct).reduce(0, +), 100, accuracy: 0.5)
     }
 }

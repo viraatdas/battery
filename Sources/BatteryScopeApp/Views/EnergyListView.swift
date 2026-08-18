@@ -12,9 +12,16 @@ import SwiftUI
 struct EnergyListView: View {
     var ranking: EnergyRanking.Result
     var windowTitle: String
+    /// Logical cores on this Mac, so the denominator can be stated in full.
+    var cpuCount: Int?
 
+    /// Bars are drawn against 100% of the machine rather than against the
+    /// biggest row, so a quiet machine looks quiet instead of making its
+    /// largest trivial process look full.
     private var maxShare: Double {
-        max(ranking.rows.compactMap(\.sharePct).max() ?? 0, 0.0001)
+        ranking.machineCores != nil
+            ? 100
+            : max(ranking.rows.compactMap(\.sharePct).max() ?? 0, 0.0001)
     }
 
     var body: some View {
@@ -37,26 +44,35 @@ struct EnergyListView: View {
         case .energy:
             return "Share of measured energy over the last few minutes."
         case .cpu:
-            // Said plainly rather than dressed up: CPU is the dominant term in
-            // what a laptop spends power on, but it is not the whole of it, and
-            // claiming otherwise would be the kind of confident wrong number
-            // this app exists to avoid.
-            return "Ranked by CPU, which is most of where power goes. For true "
-                + "per-app energy: sudo ./Scripts/install-daemon.sh"
+            // The denominator is stated, because a percentage whose base is
+            // unstated is the kind of confident wrong number this app exists to
+            // avoid — and for a while this one was exactly that.
+            var text = "Share of this Mac's CPU"
+            if let cores = ranking.machineCores {
+                text += String(format: ", which averaged %.1f", cores)
+                if let cpuCount { text += " of \(cpuCount)" }
+                text += " cores busy"
+            }
+            text += ". macOS will not let an unprivileged sampler read the CPU of "
+                + "root-owned processes, so kernel work and system daemons share one "
+                + "row. To break that row down: sudo ./Scripts/install-daemon.sh"
+            return text
         }
     }
 
     private func line(_ row: EnergyRanking.Row) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: row.kind == .terminalTab ? "macwindow" : CategoryStyle.symbol(row.category))
+        let isRemainder = row.kind == .remainder
+        return HStack(spacing: 10) {
+            Image(systemName: symbol(for: row))
                 .font(.system(size: 11))
-                .foregroundStyle(CategoryStyle.color(row.category))
+                .foregroundStyle(isRemainder ? Color.secondary : CategoryStyle.color(row.category))
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(row.label)
                         .font(.callout)
+                        .foregroundStyle(isRemainder ? Color.secondary : Color.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     if let detail = row.detail {
@@ -69,7 +85,7 @@ struct EnergyListView: View {
                 }
                 ShareBar(
                     fraction: (row.sharePct ?? 0) / maxShare,
-                    color: CategoryStyle.color(row.category),
+                    color: isRemainder ? Color.secondary.opacity(0.4) : CategoryStyle.color(row.category),
                     width: 210,
                     height: 5
                 )
@@ -80,10 +96,19 @@ struct EnergyListView: View {
             Text(row.sharePct.map { Fmt.share($0) } ?? "—")
                 .font(.callout)
                 .numeric()
+                .foregroundStyle(isRemainder ? Color.secondary : Color.primary)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel(row))
         .help(helpText(row))
+    }
+
+    private func symbol(for row: EnergyRanking.Row) -> String {
+        switch row.kind {
+        case .terminalTab: return "macwindow"
+        case .remainder: return "ellipsis.circle"
+        case .application: return CategoryStyle.symbol(row.category)
+        }
     }
 
     private func accessibilityLabel(_ row: EnergyRanking.Row) -> String {

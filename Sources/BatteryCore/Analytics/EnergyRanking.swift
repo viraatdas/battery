@@ -41,8 +41,20 @@ public enum EnergyRanking {
     /// Terminal processes collapse into their tab; everything else is grouped
     /// by application name. Rows with no measurable cost are dropped rather
     /// than listed at zero.
+    /// - Parameter machineCores: the whole machine's measured CPU demand over
+    ///   the same span, from the kernel's tick counters. This is the
+    ///   *denominator*: without it a share is a share of whatever happened to
+    ///   be tracked, which on a real machine was 0.6 cores out of 3 — so a row
+    ///   reading "75%" meant 75% of a fifth of the truth. Pass `nil` only when
+    ///   there is genuinely no pressure data.
+    /// - Parameter processCores: the summed CPU of *every* process over the
+    ///   same span. Sits between the listed rows and the machine total, and
+    ///   splits the difference into two very different things: processes this
+    ///   list left out, and CPU that belongs to no process at all.
     public static func rank(
         samples: [ProcessSample],
+        machineCores: Double? = nil,
+        processCores: Double? = nil,
         limit: Int = 8
     ) -> EnergyRanking.Result {
         guard !samples.isEmpty else { return Result(basis: .cpu, rows: []) }
@@ -129,8 +141,24 @@ public enum EnergyRanking {
             .filter { $0.cost >= floor }
             .sorted { $0.cost > $1.cost }
 
-        let total = rows.reduce(0) { $0 + $1.cost }
-        let ranked = rows
+        let attributed = rows.reduce(0) { $0 + $1.cost }
+
+        // The denominator is the machine, not the list. Only CPU has a
+        // machine-wide total to measure against; powermetrics' energy impact is
+        // a dimensionless score with no such ceiling, so an energy ranking
+        // stays a share of what was attributed — but it is a *complete*
+        // attribution, which is why that is honest there and was not here.
+        let total: Double
+        let unattributed: Double
+        if basis == .cpu, let machineCores, machineCores > 0 {
+            total = max(machineCores, attributed)
+            unattributed = max(0, machineCores - attributed)
+        } else {
+            total = attributed
+            unattributed = 0
+        }
+
+        var ranked = rows
             .prefix(limit)
             .map { row -> Row in
                 var updated = row
@@ -138,7 +166,69 @@ public enum EnergyRanking {
                 return updated
             }
 
-        return Result(basis: basis, rows: Array(ranked))
+        // What the list does not name, split by *why* it does not.
+        //
+        // The second category is not a gap in this list, and it is not all
+        // kernel time either. `proc_pidinfo` and `proc_pid_rusage` are both
+        // denied for processes this user does not own, so an unprivileged
+        // sampler cannot read the CPU of any root-owned process — and on a
+        // real machine the two heaviest were `syspolicyd` and `WindowServer`,
+        // both root. `/bin/ps` manages it only by being setuid root.
+        //
+        // So the remainder is genuine kernel work *plus* every root process,
+        // and without privilege the two cannot be separated. Saying so is the
+        // honest option; calling it "System — kernel, drivers, interrupts"
+        // was not, because most of it is ordinary software this tool simply
+        // is not allowed to look at.
+        let listed = ranked.reduce(0) { $0 + $1.cost }
+        func appendRemainder(_ id: String, _ label: String, _ detail: String?, _ cost: Double) {
+            guard total > 0, cost / total >= 0.01 else { return }
+            ranked.append(Row(
+                id: id, label: label, detail: detail, kind: .remainder,
+                category: .other, cost: cost, residentBytes: nil,
+                sharePct: cost / total * 100
+            ))
+        }
+
+        if basis == .cpu, let machineCores, machineCores > 0, let processCores {
+            let others = max(0, min(processCores, total) - listed)
+            appendRemainder("other-processes", "Other processes", "not listed individually", others)
+            appendRemainder(
+                "system", "System & root processes", "needs root to break down",
+                max(0, machineCores - max(processCores, listed))
+            )
+        } else {
+            appendRemainder("everything-else", "Everything else", nil, max(0, total - listed))
+        }
+
+        return Result(
+            basis: basis,
+            rows: Array(ranked),
+            machineCores: machineCores,
+            processCores: processCores
+        )
+    }
+
+    /// Mean cores busy across `pressure`, machine-wide.
+    ///
+    /// Pairs each sample with its predecessor, since the tick counters only
+    /// mean something as a difference, and skips pairs that span a sleep, a
+    /// stall, or a sampler restart — the same gaps the timeline refuses.
+    public static func machineCores(pressure: [PressureSample]) -> Double? {
+        let sorted = pressure.sorted { $0.timestampMs < $1.timestampMs }
+        guard sorted.count > 1 else { return nil }
+        var total = 0.0
+        var weight = 0.0
+        for index in 1..<sorted.count {
+            let previous = sorted[index - 1]
+            let current = sorted[index]
+            let seconds = Double(current.timestampMs - previous.timestampMs) / 1000
+            guard seconds > 0, seconds <= 180, current.isSameSamplerRun(as: previous),
+                  let cores = current.cpuCoresBusy(since: previous) else { continue }
+            total += cores * seconds
+            weight += seconds
+        }
+        return weight > 0 ? total / weight : nil
     }
 
     /// The process the *human* started, which is the one worth naming.
@@ -193,6 +283,8 @@ public enum EnergyRanking {
     public enum Kind: String, Sendable, Hashable {
         case terminalTab
         case application
+        /// The machine's CPU that no listed row accounts for.
+        case remainder
     }
 
     /// One line of the list.
@@ -234,10 +326,22 @@ public enum EnergyRanking {
     public struct Result: Sendable, Hashable {
         public var basis: Basis
         public var rows: [Row]
+        /// The machine's measured CPU demand the shares are against, when there
+        /// was one. `nil` means the shares are relative to the list itself.
+        public var machineCores: Double?
+        /// Summed CPU of every process over the same span, when measured.
+        public var processCores: Double?
 
-        public init(basis: Basis, rows: [Row]) {
+        public init(
+            basis: Basis,
+            rows: [Row],
+            machineCores: Double? = nil,
+            processCores: Double? = nil
+        ) {
             self.basis = basis
             self.rows = rows
+            self.machineCores = machineCores
+            self.processCores = processCores
         }
 
         public var isEmpty: Bool { rows.isEmpty }

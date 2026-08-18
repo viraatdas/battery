@@ -300,7 +300,10 @@ public enum ProcessTableReader {
     /// Small on purpose. The point is to name a culprit, and a stall is never
     /// caused by the 9th-heaviest process; keeping everything is the job of
     /// `process_samples`, which is roughly fifty times larger per tick.
-    public static let topProcessesPerResource = 6
+    /// Measured on a real machine: the top 6 covered 62% of all process CPU,
+    /// the top 25 covered 83%. Six was chosen when the list only had to name a
+    /// culprit; it is far too few to account for a machine's load.
+    public static let topProcessesPerResource = 20
 
     /// Builds process samples for everything worth remembering about this tick:
     /// every coding-agent session, plus the machine's heaviest processes by
@@ -325,7 +328,25 @@ public enum ProcessTableReader {
         snapshot: [Int32: Entry],
         previous: PreviousSnapshot?
     ) -> [ProcessSample] {
-        guard !snapshot.isEmpty else { return [] }
+        tick(timestampMs: timestampMs, snapshot: snapshot, previous: previous).samples
+    }
+
+    /// One tick's kept samples, plus the total CPU across *every* process the
+    /// snapshot saw — including the hundreds not worth a row of their own.
+    ///
+    /// That total is what separates "processes this tool did not list" from
+    /// "CPU no per-process tool can attribute at all". Measured on a real
+    /// machine at 6.56 cores busy, every user process together came to 3.28:
+    /// half the machine was kernel work — `kernel_task`, interrupts, the GPU
+    /// driver — which `proc_taskinfo` never attributes to anyone. Without this
+    /// number the two are indistinguishable and the missing half looks like a
+    /// failure of the list.
+    public static func tick(
+        timestampMs: Int64,
+        snapshot: [Int32: Entry],
+        previous: PreviousSnapshot?
+    ) -> (samples: [ProcessSample], processCores: Double) {
+        guard !snapshot.isEmpty else { return ([], 0) }
 
         let candidates = snapshot.values.map { entry in
             let rates = rates(for: entry, previous: previous, nowMs: timestampMs)
@@ -374,7 +395,11 @@ public enum ProcessTableReader {
         }
         keep.formUnion(ancestors)
 
-        return attachWorkingDirectories(to: candidates.filter { keep.contains($0.pid) })
+        let processCores = candidates.reduce(0) { $0 + $1.cpuCores }
+        return (
+            attachWorkingDirectories(to: candidates.filter { keep.contains($0.pid) }),
+            processCores
+        )
     }
 
     /// The `topProcessesPerResource` pids with the largest nonzero `measure`.

@@ -363,9 +363,22 @@ public struct Analytics: Sendable {
             // Ranked over the most recent few minutes rather than the whole
             // window: "what is eating my battery" is a question about now, and
             // a day-long average buries a process that started ten minutes ago.
-            energyRanking: EnergyRanking.rank(
-                samples: recentSamples(tracked: tracked, processSamples: nil, window: window)
-            )
+            energyRanking: {
+                let recent = recentSamples(tracked: tracked, processSamples: nil, window: window)
+                let since = recent.map(\.timestampMs).min() ?? 0
+                return EnergyRanking.rank(
+                    samples: recent,
+                    // Measured over the same span the rows cover, so the shares
+                    // are against the machine rather than against each other.
+                    machineCores: EnergyRanking.machineCores(
+                        pressure: pressure.filter { $0.timestampMs >= since }
+                    ),
+                    processCores: try? store.meanProcessCores(
+                        from: Date(timeIntervalSince1970: Double(since) / 1000),
+                        to: window.end
+                    )
+                )
+            }()
         )
     }
 }

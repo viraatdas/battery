@@ -96,7 +96,8 @@ struct PopoverContent: View {
             // is using power, named by terminal tab rather than by terminal.
             EnergyListView(
                 ranking: snapshot.report.energyRanking,
-                windowTitle: choice.longTitle
+                windowTitle: choice.longTitle,
+                cpuCount: snapshot.report.machine?.cpuCount
             )
 
             SectionDivider()

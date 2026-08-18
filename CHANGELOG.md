@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Fixed
+
+- **Percentages were shares of what the tool tracked, not of your Mac.** A row
+  reading "Arc 75%" meant 75% of the 0.6 cores the list happened to see, on a
+  machine using 3. Shares are now against measured machine-wide CPU, so 40%
+  means 40% of the Mac. On a real machine the top row went from 75% to 5.9%.
+- **Most CPU was silently dropped.** The sampler kept the top 6 processes per
+  resource; measured against ground truth that covered 62% of process CPU. It
+  now keeps 20, and what is still unlisted is shown as an explicit row rather
+  than vanishing.
+- The remainder is split by *why* it is unaccounted for: processes below the
+  cut, versus CPU that cannot be read at all. `proc_pidinfo` and
+  `proc_pid_rusage` are both denied for processes the user does not own, so an
+  unprivileged sampler cannot see any root-owned process — `syspolicyd` and
+  `WindowServer` were the two heaviest on the machine this was found on, and
+  `/bin/ps` only manages it by being setuid root. That row says so instead of
+  claiming to be kernel time.
+- The sampler records the summed CPU of every process it can see each tick, so
+  "not listed" and "not readable" are distinguishable at all.
+
+### Investigated and found correct
+
+- The kernel tick-counter maths was suspected of reading ~1.5x high. Measured
+  against `top` over identical windows it agrees to within half a percent
+  (23.9/24.0, 26.6/26.1, 22.5/22.2). The earlier discrepancy was two readings
+  taken at different moments on a fluctuating machine, not a bug.
+
 ## 1.0.0 — 2026-08-17
 
 First release.
