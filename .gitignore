@@ -13,3 +13,4 @@ RUDDER_SHARED.md
 
 # Vercel CLI link for the site deploy
 site/.vercel/
+.rudder-workspaces/

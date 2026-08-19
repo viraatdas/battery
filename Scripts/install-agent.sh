@@ -163,8 +163,21 @@ PLIST
 plutil -lint "${SAMPLER_PLIST}" > /dev/null
 plutil -lint "${MENUBAR_PLIST}" > /dev/null
 
+# The root daemon supersedes this sampler: it reads every process, including
+# the root-owned ones an unprivileged agent is denied, and it alone can run
+# powermetrics. Installing both would mean two samplers writing two databases,
+# and re-running this script would silently undo the handover the daemon
+# installer performed.
+AGENT_PLISTS=("${SAMPLER_PLIST}" "${MENUBAR_PLIST}")
+if [ -f "/Library/LaunchDaemons/com.batteryscope.daemon.plist" ]; then
+    echo "==> Root daemon is installed; it supersedes the unprivileged sampler"
+    echo "    installing the menu bar app only"
+    AGENT_PLISTS=("${MENUBAR_PLIST}")
+    rm -f "${SAMPLER_PLIST}"
+fi
+
 echo "==> Loading agents into ${DOMAIN}"
-for plist in "${SAMPLER_PLIST}" "${MENUBAR_PLIST}"; do
+for plist in "${AGENT_PLISTS[@]}"; do
     label="$(basename "${plist}" .plist)"
 
     # `bootout` returns before the service is actually gone, and bootstrapping
@@ -184,8 +197,11 @@ for plist in "${SAMPLER_PLIST}" "${MENUBAR_PLIST}"; do
     launchctl enable "${DOMAIN}/${label}" 2>/dev/null || true
 done
 
-echo "==> Waiting for the sampler to write its first samples"
+echo "==> Waiting for fresh samples"
 DB="${DATA_DIR}/batteryscope.db"
+if [ -f "/Library/Application Support/BatteryScope/batteryscope.db" ]; then
+    DB="/Library/Application Support/BatteryScope/batteryscope.db"
+fi
 # Only rows written *after* this point count. Counting every row would report
 # success from a previous install's data while this one silently failed to
 # start, which is exactly the case this check exists to catch.
