@@ -107,6 +107,7 @@ struct EnergyListView: View {
         switch row.kind {
         case .terminalTab: return "macwindow"
         case .remainder: return "ellipsis.circle"
+        case .churn: return "bolt.horizontal.circle"
         case .application: return CategoryStyle.symbol(row.category)
         }
     }

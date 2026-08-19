@@ -346,6 +346,30 @@ final class TerminalTabTests: XCTestCase {
         XCTAssertEqual(ranking.rows.compactMap(\.sharePct).reduce(0, +), 100, accuracy: 0.5)
     }
 
+    func testShortLivedProcessesGetTheirOwnRow() {
+        // powermetrics buckets everything that died mid-sample into DEAD_TASKS.
+        // On a machine running ten coding agents it measured 19,933 against 341
+        // for every live agent combined, so leaving it as a row labelled
+        // "DEAD_TASKS" — or worse, folding it into an app — hides the largest
+        // consumer behind a name nobody can act on.
+        let samples = [
+            sample("DEAD_TASKS", pid: 0, ppid: nil, energy: 19_933),
+            sample("claude", pid: 1329, ppid: 1, energy: 341),
+        ]
+
+        let ranking = EnergyRanking.rank(samples: samples)
+
+        XCTAssertEqual(ranking.basis, .energy)
+        let churn = ranking.rows.first { $0.kind == .churn }
+        XCTAssertEqual(churn?.label, "Short-lived processes")
+        XCTAssertEqual(ranking.rows.first?.kind, .churn, "and it ranks where it belongs")
+        XCTAssertGreaterThan(churn?.sharePct ?? 0, 90)
+        XCTAssertFalse(
+            ranking.rows.contains { $0.label == "DEAD_TASKS" },
+            "the raw powermetrics name never reaches the interface"
+        )
+    }
+
     func testEnergyBasisIsNotDilutedByACPUDenominator() {
         // powermetrics attributes every process, so its shares are already
         // complete; measuring them against a core count would be a category

@@ -106,6 +106,22 @@ public enum EnergyRanking {
                 if TerminalTabs.isTerminal(name: sample.name) { continue }
                 let cost = hasEnergy ? sample.energyImpact : sample.cpuCores
                 guard cost > 0 else { continue }
+                if sample.name == deadTasksName {
+                    merge(
+                        into: &accumulated,
+                        key: deadTasksName,
+                        row: Row(
+                            id: deadTasksName,
+                            label: "Short-lived processes",
+                            detail: "started and exited between samples",
+                            kind: .churn,
+                            category: .background,
+                            cost: cost,
+                            residentBytes: nil
+                        )
+                    )
+                    continue
+                }
                 let launched = launchedApp(for: sample, in: byPid)
                 let name = AppNameNormalizer.canonicalName(
                     for: launched.name,
@@ -284,7 +300,19 @@ public enum EnergyRanking {
         case application
         /// The machine's CPU that no listed row accounts for.
         case remainder
+        /// Processes that started and exited between two samples.
+        case churn
     }
+
+    /// powermetrics' name for everything that died during a sample interval.
+    ///
+    /// Worth a row of its own, and nearly worth the whole list: on a machine
+    /// running ten coding agents this measured 19,933 against 341 for every
+    /// live agent process combined — fifty times more energy in processes that
+    /// existed for milliseconds than in the agents that spawned them. A
+    /// sampler that looks every 30 seconds cannot see them individually, which
+    /// is exactly why the aggregate matters.
+    public static let deadTasksName = "DEAD_TASKS"
 
     /// One line of the list.
     public struct Row: Sendable, Hashable, Identifiable {
